@@ -1,0 +1,96 @@
+﻿grupo_ordem,grupo,indicador_ordem,indicador,nivel,tipo_linha,indicador_meta_ref,formato,resumo,exibir_no_painel,preencher_na_planilha_diaria
+1,1. Performance de Embarque,1,% Performance de embarque (Data planejada),0,calculado,,percentual,media,Sim,Sim
+1,1. Performance de Embarque,2,Meta Embarque no Prazo,0,meta_parametro,% Performance de embarque (Data planejada),numero,media,Sim,Nao
+2,2. Pedidos para separar hoje (visão das 09h),1,2.1 Demanda Total Pedidos (Programados para o dia + passivo),1,dado,,numero,media,Sim,Sim
+2,2. Pedidos para separar hoje (visão das 09h),2,2.2 Pedidos Pendentes de consolidação  (Do dia + passivo),1,dado,,numero,media,Sim,Sim
+2,2. Pedidos para separar hoje (visão das 09h),3,2.2.1 Pedidos da data (com bancos),2,dado,,numero,media,Sim,Sim
+2,2. Pedidos para separar hoje (visão das 09h),4,2.2.2 Pedidos do Passivo,2,dado,,numero,media,Sim,Sim
+2,2. Pedidos para separar hoje (visão das 09h),5,2.3 Pedidos fora de carga (Ainda não estão na etapa do DUN),1,dado,,numero,media,Sim,Sim
+2,2. Pedidos para separar hoje (visão das 09h),6,2.4 Pedidos sem Nota Fiscal (ainda nas primeiras etapas do processo),1,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,1,Pedidos do dia,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,2,Atrasos Transportadoras - Pronto para embarque,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,3,Atrasos Operações Próprias - Pronto para embarque,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,4,Atraso Intra - Pendente de consolidação,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,5,Atraso Intra - Pronto Após o horário de corte - Pronto para embarque,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,6,Operação Especial Sodexo,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,7,Atraso Transferências,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,8,Total Atrasos,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,9,Pedidos em Atraso - 1 dia,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,10,Pedidos em Atraso - 2 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,11,Pedidos em Atraso - 3 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,12,Pedidos em Atraso - 4 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,13,Pedidos em Atraso - 5 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,14,Pedidos em Atraso - 6 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,15,Pedidos em Atraso - 7 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,16,Pedidos em Atraso - 8 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,17,Pedidos em Atraso - 9 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,18,Pedidos em Atraso - 10 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,19,Pedidos em Atraso - 2 a 5 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,20,Pedidos em Atraso - 6 a 10 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,21,Pedidos em Atraso - 11 a 15 dias,0,dado,,numero,media,Sim,Sim
+3,3. Atraso de Embarque - Visão Operações,22,Pedidos em Atraso - acima de 15 dias,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,1,Atraso de embarque Operações,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,2,Atraso Ajuste PCP,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,3,Operação Especial Sodexo,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,4,Total Atrasos,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,5,Pedidos em Atraso - até 1 dia,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,6,Pedidos em Atraso - 2 a 5 dias,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,7,Pedidos em Atraso - 6 a 10 dias,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,8,Pedidos em Atraso - 11 a 15 dias,0,dado,,numero,media,Sim,Sim
+4,4. Atraso de Embarque Operação + Visão Cliente,9,Pedidos em Atraso - acima de 15 dias,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,1,Retoro para Reembarque,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,2,Exclusão de Romaneio,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,3,Total Atrasos,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,4,Pedidos em Atraso - até 1 dia,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,5,Pedidos em Atraso - 2 a 5 dias,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,6,Pedidos em Atraso - 6 a 10 dias,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,7,Pedidos em Atraso - 11 a 15 dias,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,8,Pedidos em Atraso - acima de 15 dias,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,9,Pedidos em Atraso - 16 a 20 dias,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,10,Pedidos em Atraso - 21 a 30 dias,0,dado,,numero,media,Sim,Sim
+5,5. Retorno para Reembarque,11,Pedidos em Atraso - acima de 30 dias,0,dado,,numero,media,Sim,Sim
+6,6. Linhas Planejadas PCP (Linha sem quebra na Prod),1,Linhas Previstas PCP,0,meta_parametro,,numero,media,Sim,Nao
+6,6. Linhas Planejadas PCP (Linha sem quebra na Prod),2,Linhas Planejadas PCP,0,dado,,numero,media,Sim,Sim
+6,6. Linhas Planejadas PCP (Linha sem quebra na Prod),3,% Atingimento,0,calculado,,percentual,media,Sim,Sim
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),1,Linhas Faturadas,0,dado,,numero,media,Sim,Sim
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),2,Capacidade Total CD (DUN + FRAC + Bancos),0,meta_parametro,Linhas Faturadas,numero,media,Sim,Nao
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),3,Total Linhas Separadas (DUN + FRAC + Bancos),0,dado,,numero,media,Sim,Sim
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),4,% Atingimento Separação x Capacidade,0,meta_parametro,Total Linhas Separadas (DUN + FRAC + Bancos),percentual,media,Sim,Nao
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),5,>Capacidade FRAC,0,meta_parametro,Total Linhas Separadas (DUN + FRAC + Bancos),numero,media,Sim,Nao
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),6,Separado FRAC,0,dado,,numero,media,Sim,Sim
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),7,>Capacidade DUN,0,meta_parametro,Separado FRAC,numero,media,Sim,Nao
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),8,Separado DUN,0,dado,,numero,media,Sim,Sim
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),9,>Capacidade Bancos,0,meta_parametro,Separado DUN,numero,media,Sim,Nao
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),10,Separado Bancos,0,dado,,numero,media,Sim,Sim
+7,7.Linhas Faturadas/Separadas (Com quebra na Prod),11,Backlog 18hrs do D-1,0,dado,,numero,media,Sim,Sim
+8,8. Pedidos Consolidados,1,Pedidos Consolidados (sem bancos),0,dado,,numero,media,Sim,Sim
+8,8. Pedidos Consolidados,2,Pedidos Consolidados (Só bancos),0,dado,,numero,media,Sim,Sim
+8,8. Pedidos Consolidados,3,Total Consolidação,0,dado,,numero,media,Sim,Sim
+8,8. Pedidos Consolidados,4,Meta de Consolidação,0,meta_parametro,Total Consolidação,numero,media,Sim,Nao
+8,8. Pedidos Consolidados,5,Pedidos Planejados,0,dado,,numero,media,Sim,Sim
+8,8. Pedidos Consolidados,6,% Atingimento,0,calculado,,percentual,media,Sim,Sim
+9,9. Faturamento,1,Faturamento Realizado,0,dado,,moeda,soma,Sim,Sim
+9,9. Faturamento,2,Faturamento Necessario,0,meta_parametro,Faturamento Realizado,moeda,soma,Sim,Nao
+9,9. Faturamento,3,% Atingimento,0,calculado,,percentual,media,Sim,Sim
+10,6. Abastecimento,1,Abastecimento Realizado DUN,0,dado,,numero,media,Sim,Sim
+10,6. Abastecimento,2,Abastecimento Projetado DUN,0,meta_parametro,Abastecimento Realizado DUN,numero,media,Sim,Nao
+10,6. Abastecimento,3,% Atingimento,0,calculado,,percentual,media,Sim,Sim
+11,10. Coletas em Pulmão,1,Coletas Totais,0,dado,,numero,media,Sim,Sim
+11,10. Coletas em Pulmão,2,Coletas em Pulmão,0,dado,,numero,media,Sim,Sim
+11,10. Coletas em Pulmão,3,% Coletas em Pulmão,0,calculado,,percentual,media,Sim,Sim
+12,11. Rupturas,1,Total de Rupturas,0,dado,,numero,media,Sim,Sim
+12,11. Rupturas,2,# Mezanino,0,dado,,numero,media,Sim,Sim
+12,11. Rupturas,3,% Mezanino,0,calculado,,percentual,media,Sim,Sim
+12,11. Rupturas,4,# DUN,0,dado,,numero,media,Sim,Sim
+12,11. Rupturas,5,% DUN,0,calculado,,percentual,media,Sim,Sim
+12,11. Rupturas,6,# Painel,0,dado,,numero,media,Sim,Sim
+12,11. Rupturas,7,% Painel de Integração,0,calculado,,percentual,media,Sim,Sim
+13,12. Ocorrências no Cliente,1,Total de Ocorrências,0,dado,,numero,media,Sim,Sim
+13,12. Ocorrências no Cliente,2,Falta de Item,0,dado,,numero,media,Sim,Sim
+13,12. Ocorrências no Cliente,3,Troca de Item,0,dado,,numero,media,Sim,Sim
+13,12. Ocorrências no Cliente,4,Avaria de Item,0,dado,,moeda,soma,Sim,Sim
+13,12. Ocorrências no Cliente,5,Sobra de Item,0,dado,,numero,media,Sim,Sim
+13,12. Ocorrências no Cliente,6,Ocorrência Média últimos 30 dias,0,dado,,numero,media,Sim,Sim
+14,13. Custos de Avarias e Perdas,1,Perdas Totais,0,dado,,moeda,soma,Sim,Sim
+14,13. Custos de Avarias e Perdas,2,R$ Avaria Interna,0,dado,,moeda,soma,Sim,Sim
+14,13. Custos de Avarias e Perdas,3,R$ Extravios,0,dado,,moeda,soma,Sim,Sim
