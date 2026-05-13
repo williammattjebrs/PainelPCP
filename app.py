@@ -18,7 +18,6 @@ import plotly.express as px
 import streamlit as st
 
 APP_TITLE = "Painel de Indicadores Intralogística"
-APP_BUILD_FIX = "baseline_login_meta_export_buttons_visible_2026_05_11"
 GLOBAL_DASHBOARD_USERNAME = "__TODOS_USUARIOS__"
 DB_PATH = os.getenv("PCP_DB_PATH", "data/indicadores.db")
 LOGO_PATH = Path("assets/br_supply_logo.png")
@@ -2973,45 +2972,24 @@ def matrix_value_for_day(
 
     A função centraliza a regra para que o total do mês e o atingimento mensal
     usem exatamente a mesma base visual das colunas diárias.
-
-    Importante: linhas classificadas como meta/parâmetro podem ser preenchidas
-    diariamente no painel. Quando houver valor preenchido para a data, esse valor
-    prevalece. A meta versionada fica como fallback, não como substituta do dado
-    operacional preenchido.
     """
     ds = day.isoformat()
     grupo = str(row.get("grupo") or "")
     indicador = str(row.get("indicador") or "")
     tipo = str(row.get("tipo_campo") or "")
 
-    def _filled_daily_value() -> Optional[float]:
-        if vals is None or vals.empty:
-            return None
+    value = None
+    if tipo == "dado_diario":
         code = str(row.get("codigo_indicador") or "").strip()
         m = pd.DataFrame()
         if code and "codigo_indicador" in vals.columns:
-            m = vals[
-                (vals["data"].astype(str) == ds)
-                & (vals["cd"].astype(str) == str(cd))
-                & (vals["codigo_indicador"].fillna("").astype(str).str.strip() == code)
-            ]
+            m = vals[(vals["data"] == ds) & (vals["cd"].astype(str) == str(cd)) & (vals["codigo_indicador"].fillna("").astype(str).str.strip() == code)]
         if m.empty:
-            m = vals[
-                (vals["data"].astype(str) == ds)
-                & (vals["cd"].astype(str) == str(cd))
-                & (vals["grupo"].astype(str) == grupo)
-                & (vals["indicador"].astype(str) == indicador)
-            ]
-        if not m.empty:
-            m = m[m["valor"].notna()].copy()
-        if not m.empty:
-            return float(m.sort_values("id" if "id" in m.columns else "data").iloc[-1]["valor"])
-        return None
-
-    value = None
-    if tipo in {"dado_diario", "meta", "parametro"}:
-        value = _filled_daily_value()
-        if value is None and tipo in {"meta", "parametro"} and day <= last_day_of_month():
+            m = vals[(vals["data"] == ds) & (vals["cd"].astype(str) == str(cd)) & (vals["grupo"] == grupo) & (vals["indicador"] == indicador)]
+        if not m.empty and m.iloc[-1]["valor"] is not None and not pd.isna(m.iloc[-1]["valor"]):
+            value = float(m.iloc[-1]["valor"])
+    elif tipo in {"meta", "parametro"}:
+        if day <= last_day_of_month():
             target = target_for_matrix_row_cached(cd, row, ds, target_maps_by_date.get(ds, {}))
             if target and target.get("valor_meta") is not None and not pd.isna(target.get("valor_meta")):
                 value = float(target["valor_meta"])
@@ -3153,56 +3131,6 @@ def format_month_achievement(numerator: Optional[float], denominator: Optional[f
 
 # ----------------------------- páginas -----------------------------
 
-def build_matrix_visual_export_rows(
-    cfg: pd.DataFrame,
-    vals: pd.DataFrame,
-    cfg_all: pd.DataFrame,
-    calc_by_date: dict[str, dict[tuple[str, str], float]],
-    target_maps_by_date: dict[str, dict[tuple[str, str, str], dict]],
-    period_total_lookup: dict[tuple[str, str], Optional[float]],
-    cd: str,
-    dates: list[date],
-    can_configure: bool = False,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if cfg is None or cfg.empty:
-        return rows
-    for grupo, gdf in cfg.groupby("grupo", sort=False):
-        visible_rows = []
-        for _, r in gdf.iterrows():
-            tipo = str(r.get("tipo_campo") or "")
-            if tipo == "parametro" and not bool(r.get("exibir_meta_como_linha")):
-                continue
-            visible_rows.append(r)
-        if not visible_rows:
-            continue
-        rows.append({"indicador": str(grupo), "values": [""] * len(dates), "summary_values": [""], "group": True})
-        for r in visible_rows:
-            indicador = str(r.get("indicador") or "")
-            tipo = str(r.get("tipo_campo") or "")
-            row_hidden = not (bool(r.get("ativo")) and bool(r.get("exibir_painel_matricial")))
-            if row_hidden and not can_configure:
-                continue
-            rendered_values: list[str] = []
-            raw_values: list[float] = []
-            for d in dates:
-                ds = d.isoformat()
-                value = matrix_value_for_day(vals, cfg_all, calc_by_date, target_maps_by_date, cd, r, d)
-                target = target_for_matrix_row_cached(cd, r, ds, target_maps_by_date.get(ds, {}))
-                emoji = ""
-                if bool(r.get("usar_sinaleira")) and tipo != "meta":
-                    emoji, _ = status_for_value(value, target, r)
-                rendered_values.append(((emoji + " ") if emoji else "") + (format_value(value, str(r.get("formato") or "numero"), indicador) or ""))
-                if value is not None and not pd.isna(value):
-                    raw_values.append(float(value))
-            period_value = period_total_lookup.get((str(r.get("grupo") or ""), indicador))
-            if period_value is None and raw_values:
-                period_value = sum(raw_values) / len(raw_values)
-            summary = format_value(period_value, str(r.get("formato") or "numero"), indicador) or ""
-            rows.append({"indicador": indicador + (" [oculto]" if row_hidden and can_configure else ""), "values": rendered_values, "summary_values": [summary], "group": False})
-    return rows
-
-
 def page_matrix() -> None:
     header_slot = st.empty()
     centers = [c for c in allowed_centers(st.session_state["user"]["username"])]
@@ -3251,8 +3179,6 @@ def page_matrix() -> None:
     if start > end:
         start = end
 
-    matrix_export_slot = st.empty()
-
     show_hidden_admin = bool(st.session_state.get("matrix_show_hidden_admin", True)) if can_configure else False
     motivo_visibilidade = str(st.session_state.get("matrix_quick_visibility_motivo", "") or "")
     admin_centers: list[str] = active_center_codes() if can_configure else []
@@ -3299,17 +3225,6 @@ def page_matrix() -> None:
         render_matrix_unsaved_warning()
 
     default_date_labels = [br_date_label(d.isoformat()) for d in dates]
-
-    matrix_export_rows = build_matrix_visual_export_rows(cfg, vals, cfg_all, calc_by_date, target_maps_by_date, period_total_lookup, cd, dates, can_configure)
-    matrix_export_headers = ["Indicador"] + default_date_labels + ["Média/Resumo"]
-    matrix_export_png = _matrix_to_png(
-        f"Painel Diário de Indicadores - CD {cd}",
-        matrix_export_headers,
-        matrix_export_rows,
-        subtitle=f"Visão: {view_label} · Período: {br_date_label(start.isoformat())} a {br_date_label(end.isoformat())}",
-    )
-    with matrix_export_slot.container():
-        render_visual_export_buttons(f"matrix_export_{cd}_{start.isoformat()}_{end.isoformat()}", f"painel_diario_{cd}_{start.isoformat()}_{end.isoformat()}", matrix_export_png)
 
     for grupo, gdf in cfg.groupby("grupo", sort=False):
         date_labels = [matrix_column_label(cd, str(grupo), d) for d in dates] if group_uses_next_workday_label(str(grupo)) else default_date_labels
@@ -4691,234 +4606,9 @@ def dashboard_comparison_payload(
     }
 
 
-def _dashboard_direct_filled_value_for_row(
-    vals: pd.DataFrame,
-    cd: str,
-    row: pd.Series | dict[str, Any],
-    start_iso: str,
-    end_iso: str,
-    agg: str,
-) -> Optional[float]:
-    """Lê somente valor preenchido em values_indicators, ignorando target_versions."""
-    if vals is None or vals.empty:
-        return None
-    try:
-        start_d = pd.to_datetime(start_iso).date()
-        end_d = pd.to_datetime(end_iso).date()
-    except Exception:
-        return None
-    if end_d < start_d:
-        return None
-    grupo = str(row.get("grupo") or "")
-    indicador = str(row.get("indicador") or "")
-    codigo = str(row.get("codigo_indicador") or "").strip()
-    scope = vals[
-        (vals["cd"].astype(str).eq(str(cd)))
-        & (pd.to_datetime(vals["data"]).dt.date >= start_d)
-        & (pd.to_datetime(vals["data"]).dt.date <= end_d)
-    ].copy()
-    if scope.empty:
-        return None
-    if codigo and "codigo_indicador" in scope.columns:
-        by_code = scope[scope["codigo_indicador"].fillna("").astype(str).str.strip().eq(codigo)].copy()
-    else:
-        by_code = pd.DataFrame()
-    if by_code.empty:
-        by_code = scope[(scope["grupo"].astype(str).eq(grupo)) & (scope["indicador"].astype(str).eq(indicador))].copy()
-    if by_code.empty or "valor" not in by_code.columns:
-        return None
-    by_code = by_code[by_code["valor"].notna()].copy()
-    if by_code.empty:
-        return None
-    by_code["__data"] = pd.to_datetime(by_code["data"]).dt.date
-    # Se houver mais de um lançamento para o mesmo dia, usa o último ID.
-    sort_cols = ["__data"] + (["id"] if "id" in by_code.columns else [])
-    by_code = by_code.sort_values(sort_cols)
-    daily = by_code.groupby("__data", as_index=False).tail(1)
-    values = [float(v) for v in daily["valor"].tolist() if v is not None and not pd.isna(v)]
-    if not values:
-        return None
-    if agg == "sum":
-        return float(sum(values))
-    if agg == "mean":
-        return float(sum(values) / len(values))
-    return float(values[-1])
-
-
-def _dashboard_reference_value_guard(
-    vals: pd.DataFrame,
-    configs: pd.DataFrame,
-    cd: str,
-    cfgrow: pd.Series | dict[str, Any],
-    reference_row: pd.Series | dict[str, Any],
-    actual_value: Optional[float],
-    reference_value: Optional[float],
-    start_iso: str,
-    end_iso: str,
-    agg_mode: str,
-    runtime_cache: Optional[dict[str, Any]] = None,
-) -> tuple[Optional[float], pd.Series | dict[str, Any]]:
-    """Corrige referência numérica absurda no Dashboard.
-
-    Caso real que motivou a regra: cards de volume, como Pedidos Programados,
-    estavam buscando uma meta versionada igual a 1 em vez da linha diária
-    Planejada/Prevista preenchida no painel. Quando o realizado é volumétrico
-    e a referência volta como 0/1, o método procura uma linha planejada diária
-    equivalente no mesmo CD/grupo e usa o valor efetivamente preenchido.
-    """
-    try:
-        actual = None if actual_value is None or pd.isna(actual_value) else float(actual_value)
-    except Exception:
-        actual = None
-    try:
-        current_ref = None if reference_value is None or pd.isna(reference_value) else float(reference_value)
-    except Exception:
-        current_ref = None
-
-    # Referências percentuais legítimas costumam comparar valores pequenos.
-    # Só aplicamos a correção quando o realizado é claramente volumétrico.
-    if actual is None or abs(actual) <= 10:
-        return reference_value, reference_row
-    if current_ref is not None and abs(current_ref) > 1.5:
-        return reference_value, reference_row
-    if configs is None or configs.empty:
-        return reference_value, reference_row
-
-    scope = configs[configs["cd"].astype(str).eq(str(cd))].copy()
-    if scope.empty:
-        return reference_value, reference_row
-    if "ativo" in scope.columns:
-        scope = scope[scope["ativo"].fillna(1).astype(int).eq(1)].copy()
-    scope = scope[scope["indicador"].astype(str).ne("__CABECALHO__")].copy()
-    if scope.empty:
-        return reference_value, reference_row
-
-    actual_ind = _formula_key(cfgrow.get("indicador"))
-    actual_grp = _formula_key(cfgrow.get("grupo"))
-    ref_ind = _formula_key(reference_row.get("indicador"))
-    ref_grp = _formula_key(reference_row.get("grupo"))
-
-    planned_stems = ["PLANEJ", "PREVIST", "NECESS", "PROJET", "OBJETIVO", "META"]
-    actual_stems = ["PROGRAM", "REALIZ", "EXECUT", "FATUR", "PRODUZ", "SEPAR", "CONSOLID"]
-    target_names: set[str] = set()
-    for old in ["PROGRAMADOS", "PROGRAMADAS", "PROGRAMADO", "PROGRAMADA", "REALIZADO", "REALIZADA", "EXECUTADO", "EXECUTADA"]:
-        if old in actual_ind:
-            for new in ["PLANEJADOS", "PLANEJADAS", "PLANEJADO", "PLANEJADA", "PREVISTOS", "PREVISTAS", "NECESSARIO", "NECESSARIA"]:
-                target_names.add(actual_ind.replace(old, new))
-
-    focus_tokens = [
-        t for t in actual_ind.split()
-        if len(t) >= 4
-        and not any(stem in t for stem in planned_stems + actual_stems)
-    ]
-
-    best_row = reference_row
-    best_value = reference_value
-    best_score = -1
-    seen: set[tuple[str, str, str]] = set()
-
-    for _, cand in scope.iterrows():
-        key = (str(cand.get("cd") or ""), str(cand.get("grupo") or ""), str(cand.get("indicador") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        cand_ind = _formula_key(cand.get("indicador"))
-        cand_grp = _formula_key(cand.get("grupo"))
-        score = 0
-        if cand_grp == actual_grp:
-            score += 45
-        if cand_grp == ref_grp:
-            score += 30
-        if cand_ind == ref_ind:
-            score += 25
-        if cand_ind in target_names:
-            score += 90
-        if any(stem in cand_ind for stem in planned_stems):
-            score += 40
-        if focus_tokens and any(tok in cand_ind for tok in focus_tokens):
-            score += 25
-        # Evita trocar por outra linha realizada/programada quando procuramos planejado.
-        if any(stem in cand_ind for stem in ["REALIZ", "EXECUT", "PROGRAM"]):
-            score -= 35
-        if score < 55:
-            continue
-        cand_agg = dashboard_aggregation_mode(cand, agg_mode)
-        try:
-            cand_value = dashboard_value_matrix_rule(vals, configs, cd, cand, start_iso, end_iso, cand_agg, runtime_cache=runtime_cache)
-        except Exception:
-            cand_value = None
-        try:
-            cand_float = None if cand_value is None or pd.isna(cand_value) else float(cand_value)
-        except Exception:
-            cand_float = None
-
-        # Para linhas meta/parâmetro, se a regra normal caiu na meta versionada 0/1,
-        # tenta recuperar o valor efetivamente preenchido no painel diário.
-        if cand_float is None or abs(cand_float) <= 1.5:
-            direct_value = _dashboard_direct_filled_value_for_row(vals, cd, cand, start_iso, end_iso, cand_agg)
-            try:
-                direct_float = None if direct_value is None or pd.isna(direct_value) else float(direct_value)
-            except Exception:
-                direct_float = None
-            if direct_float is not None and abs(direct_float) > 1.5:
-                cand_float = direct_float
-
-        if cand_float is None or abs(cand_float) <= 1.5:
-            continue
-        # Referência operacional deve ter ordem de grandeza minimamente compatível.
-        if abs(actual) > 100 and abs(cand_float) < abs(actual) * 0.05:
-            continue
-        if score > best_score:
-            best_score = score
-            best_row = cand
-            best_value = cand_float
-
-    return best_value, best_row
-
-
-def _dashboard_reference_value_with_daily_priority(
-    vals: pd.DataFrame,
-    cd: str,
-    reference_row: pd.Series | dict[str, Any],
-    reference_value: Optional[float],
-    start_iso: str,
-    end_iso: str,
-    ref_agg: str,
-) -> Optional[float]:
-    """Prioriza valor preenchido no Painel Diário para a linha de referência.
-
-    Corrige casos em que uma linha de meta/parâmetro possui meta versionada 1,
-    mas o planejado operacional do dia foi preenchido na matriz como 1.179, 14.779 etc.
-    Para comparativo de card, quando existe dado preenchido no período, ele é a fonte correta.
-    """
-    direct_value = _dashboard_direct_filled_value_for_row(vals, cd, reference_row, start_iso, end_iso, ref_agg)
-    try:
-        direct_float = None if direct_value is None or pd.isna(direct_value) else float(direct_value)
-    except Exception:
-        direct_float = None
-    if direct_float is None:
-        return reference_value
-
-    ref_tipo = str(reference_row.get("tipo_campo") or "")
-    try:
-        ref_float = None if reference_value is None or pd.isna(reference_value) else float(reference_value)
-    except Exception:
-        ref_float = None
-
-    # Meta/parâmetro preenchido no painel sempre prevalece sobre target_versions.
-    if ref_tipo in {"meta", "parametro"}:
-        return direct_float
-
-    # Também corrige qualquer referência volumétrica que tenha caído em 0/1 por meta versionada.
-    if ref_float is not None and abs(ref_float) <= 1.5 and abs(direct_float) > 1.5:
-        return direct_float
-    return reference_value
-
-
-def build_dashboard_card_payloads(selected: pd.DataFrame, vals: pd.DataFrame, configs: pd.DataFrame, cd: str, start_iso: str, end_iso: str, agg_mode: str, runtime_cache: Optional[dict[str, Any]] = None) -> list[dict[str, str]]:
+def render_dashboard_card_grid(title: str, selected: pd.DataFrame, vals: pd.DataFrame, configs: pd.DataFrame, cd: str, start_iso: str, end_iso: str, agg_mode: str, runtime_cache: Optional[dict[str, Any]] = None) -> None:
+    st.subheader(title)
     payloads: list[dict[str, str]] = []
-    if selected is None or selected.empty:
-        return payloads
     for _, r in selected.iterrows():
         if not dashboard_card_enabled_for_context(r, agg_mode):
             continue
@@ -4928,12 +4618,6 @@ def build_dashboard_card_payloads(selected: pd.DataFrame, vals: pd.DataFrame, co
         if reference_row is not None:
             ref_agg = dashboard_aggregation_mode(reference_row, agg_mode)
             reference_value = dashboard_value_matrix_rule(vals, configs, cd, reference_row, start_iso, end_iso, ref_agg, runtime_cache=runtime_cache)
-            reference_value = _dashboard_reference_value_with_daily_priority(
-                vals, cd, reference_row, reference_value, start_iso, end_iso, ref_agg
-            )
-            reference_value, reference_row = _dashboard_reference_value_guard(
-                vals, configs, cd, r, reference_row, value, reference_value, start_iso, end_iso, agg_mode, runtime_cache=runtime_cache
-            )
             payload = dashboard_comparison_payload(dashboard_card_title(r), value, reference_value, r, reference_row)
         else:
             target = target_for_matrix_row(cd, r, end_iso)
@@ -4942,12 +4626,6 @@ def build_dashboard_card_payloads(selected: pd.DataFrame, vals: pd.DataFrame, co
         if tooltip:
             payload["tooltip"] = tooltip
         payloads.append(payload)
-    return payloads
-
-
-def render_dashboard_card_grid(title: str, selected: pd.DataFrame, vals: pd.DataFrame, configs: pd.DataFrame, cd: str, start_iso: str, end_iso: str, agg_mode: str, runtime_cache: Optional[dict[str, Any]] = None) -> None:
-    st.subheader(title)
-    payloads = build_dashboard_card_payloads(selected, vals, configs, cd, start_iso, end_iso, agg_mode, runtime_cache=runtime_cache)
 
     if not payloads:
         st.info("Nenhum card para exibir.")
@@ -4963,202 +4641,6 @@ def render_dashboard_card_grid(title: str, selected: pd.DataFrame, vals: pd.Data
                     render_dashboard_card_native(row_payloads[idx])
                 else:
                     st.empty()
-
-
-def _visual_font(size: int, bold: bool = False):
-    from PIL import ImageFont
-    candidates = [
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
-        "arial.ttf",
-    ]
-    for font_path in candidates:
-        try:
-            return ImageFont.truetype(font_path, size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
-
-
-def _wrap_visual_text(draw, text: str, font, max_width: int) -> list[str]:
-    words = str(text or "").split()
-    if not words:
-        return [""]
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        trial = word if not current else f"{current} {word}"
-        try:
-            width = draw.textbbox((0, 0), trial, font=font)[2]
-        except Exception:
-            width = len(trial) * 8
-        if width <= max_width or not current:
-            current = trial
-        else:
-            lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines
-
-
-def _payload_sections_to_png(title: str, sections: list[tuple[str, list[dict[str, str]]]], subtitle: str = "") -> bytes:
-    from PIL import Image, ImageDraw
-    width = 1600
-    margin = 42
-    gap = 22
-    card_w = int((width - margin * 2 - gap * 3) / 4)
-    card_h = 150
-    title_font = _visual_font(34, True)
-    section_font = _visual_font(22, True)
-    label_font = _visual_font(15, True)
-    value_font = _visual_font(30, True)
-    sub_font = _visual_font(16, False)
-    small_font = _visual_font(14, False)
-
-    rows_count = 0
-    for _heading, payloads in sections:
-        rows_count += 1 + max(1, (len(payloads) + 3) // 4)
-    height = margin + 58 + (22 if subtitle else 0) + rows_count * (card_h + 56) + margin
-    img = Image.new("RGB", (width, max(height, 520)), "#fffaf6")
-    draw = ImageDraw.Draw(img)
-
-    y = margin
-    draw.text((margin, y), title, fill="#333333", font=title_font)
-    y += 46
-    if subtitle:
-        draw.text((margin, y), subtitle, fill="#6b7280", font=small_font)
-        y += 32
-
-    color_map = {"ok": "#22c55e", "warn": "#f5b301", "bad": "#e11d48", "none": "#f68620"}
-    for heading, payloads in sections:
-        y += 10
-        draw.text((margin, y), heading, fill="#333333", font=section_font)
-        y += 36
-        if not payloads:
-            payloads = [{"label": "Sem cards", "value": "—", "status": "", "class": "none"}]
-        for idx, p in enumerate(payloads):
-            col = idx % 4
-            row = idx // 4
-            x = margin + col * (card_w + gap)
-            cy = y + row * (card_h + gap)
-            klass = str(p.get("class") or "none")
-            border = color_map.get(klass, "#f68620")
-            draw.rounded_rectangle((x, cy, x + card_w, cy + card_h), radius=18, fill="#ffffff", outline="#f3d4bd", width=1)
-            draw.rectangle((x, cy, x + 7, cy + card_h), fill=border)
-            tx = x + 22
-            ty = cy + 18
-            for line in _wrap_visual_text(draw, str(p.get("label") or ""), label_font, card_w - 42)[:2]:
-                draw.text((tx, ty), line.upper(), fill="#737373", font=label_font)
-                ty += 18
-            value_text = (str(p.get("emoji") or "") + " " + str(p.get("value") or "—")).strip()
-            draw.text((tx, cy + 66), value_text, fill="#333333", font=value_font)
-            status_text = str(p.get("status") or "")
-            for line in _wrap_visual_text(draw, status_text, sub_font, card_w - 42)[:2]:
-                draw.text((tx, cy + 116), line, fill="#6b7280", font=sub_font)
-                cy += 18
-        y += ((len(payloads) + 3) // 4) * (card_h + gap) + 20
-
-    out = io.BytesIO()
-    img.save(out, format="PNG")
-    return out.getvalue()
-
-
-def _matrix_to_png(title: str, headers: list[str], rows: list[dict[str, Any]], subtitle: str = "") -> bytes:
-    from PIL import Image, ImageDraw
-    width = 1800
-    margin = 34
-    row_h = 36
-    title_font = _visual_font(32, True)
-    header_font = _visual_font(15, True)
-    cell_font = _visual_font(14, False)
-    small_font = _visual_font(13, False)
-    max_rows = min(len(rows), 90)
-    height = margin + 72 + (22 if subtitle else 0) + (max_rows + 1) * row_h + margin
-    img = Image.new("RGB", (width, max(height, 520)), "#fffaf6")
-    draw = ImageDraw.Draw(img)
-    y = margin
-    draw.text((margin, y), title, fill="#333333", font=title_font)
-    y += 44
-    if subtitle:
-        draw.text((margin, y), subtitle, fill="#6b7280", font=small_font)
-        y += 28
-
-    indicator_w = 420
-    remaining_w = width - margin * 2 - indicator_w
-    other_w = max(96, int(remaining_w / max(1, len(headers) - 1)))
-    col_widths = [indicator_w] + [other_w] * (len(headers) - 1)
-    x = margin
-    draw.rectangle((margin, y, width - margin, y + row_h), fill="#f8f9fb", outline="#e5e7eb")
-    for h, w in zip(headers, col_widths):
-        draw.text((x + 8, y + 10), str(h), fill="#6b7280", font=header_font)
-        x += w
-    y += row_h
-    for r in rows[:max_rows]:
-        bg = "#ffffff" if rows.index(r) % 2 == 0 else "#fff4ea"
-        draw.rectangle((margin, y, width - margin, y + row_h), fill=bg, outline="#eeeeee")
-        values = [str(r.get("indicador") or "")] + [str(v or "") for v in r.get("values", [])] + [str(v or "") for v in r.get("summary_values", [])]
-        x = margin
-        for val, w in zip(values, col_widths):
-            safe = val.replace("🟢", "OK ").replace("🟡", "ATENCAO ").replace("🔴", "FORA ")
-            draw.text((x + 8, y + 10), safe[:48], fill="#333333", font=cell_font)
-            x += w
-        y += row_h
-    if len(rows) > max_rows:
-        draw.text((margin, y + 8), f"Exportação visual limitada aos primeiros {max_rows} registros de {len(rows)}.", fill="#6b7280", font=small_font)
-    out = io.BytesIO()
-    img.save(out, format="PNG")
-    return out.getvalue()
-
-
-def _png_to_pdf_bytes(png_bytes: bytes) -> bytes:
-    from PIL import Image
-    img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-    out = io.BytesIO()
-    img.save(out, format="PDF")
-    return out.getvalue()
-
-
-def _png_to_xlsx_bytes(png_bytes: bytes, sheet_name: str = "Visao") -> bytes:
-    from openpyxl import Workbook
-    from openpyxl.drawing.image import Image as XLImage
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-    img_stream = io.BytesIO(png_bytes)
-    xl_img = XLImage(img_stream)
-    ws.add_image(xl_img, "A1")
-    out = io.BytesIO()
-    wb.save(out)
-    return out.getvalue()
-
-
-def render_visual_export_buttons(key_prefix: str, base_filename: str, png_bytes: bytes) -> None:
-    """Botões visíveis de exportação da área útil, em formato de print estruturado."""
-    with st.container(border=True):
-        st.markdown("**Exportar visão atual**")
-        st.caption("Exporta somente a área útil dos dados/cards em formato visual, como um print estruturado. Não inclui navegador nem menu lateral.")
-        c1, c2 = st.columns(2, gap="small")
-        with c1:
-            st.download_button(
-                "📷 Exportar imagem (PNG)",
-                data=png_bytes,
-                file_name=f"{base_filename}.png",
-                mime="image/png",
-                use_container_width=True,
-                key=f"{key_prefix}_png",
-            )
-        with c2:
-            st.download_button(
-                "📄 Exportar PDF",
-                data=_png_to_pdf_bytes(png_bytes),
-                file_name=f"{base_filename}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                key=f"{key_prefix}_pdf",
-            )
-    st.markdown("<div style='height:.8rem'></div>", unsafe_allow_html=True)
 
 def total_working_days_in_month(cd: str, ref_day: date) -> int:
     start_month = date(ref_day.year, ref_day.month, 1)
@@ -5350,7 +4832,7 @@ def _objective_metric_payload(
     return {"label": label, "value": obj_txt, "sub": sub, "class": status_class, "tooltip": tooltip}
 
 
-def dashboard_month_north_metrics_payload(cd: str, configs: pd.DataFrame, vals: pd.DataFrame, ref_day: date, runtime_cache: Optional[dict[str, Any]] = None) -> list[dict[str, str]]:
+def render_dashboard_month_north_metrics(cd: str, configs: pd.DataFrame, vals: pd.DataFrame, ref_day: date, runtime_cache: Optional[dict[str, Any]] = None) -> None:
     total_days = total_working_days_in_month(cd, ref_day)
     last_fill = latest_filled_date_from_values(vals, ref_day)
     done_days = elapsed_working_days_in_month(cd, last_fill) if last_fill and last_fill.month == ref_day.month and last_fill.year == ref_day.year else 0
@@ -5362,16 +4844,12 @@ def dashboard_month_north_metrics_payload(cd: str, configs: pd.DataFrame, vals: 
     if linhas_actual is None:
         linhas_actual = _find_indicator_by_terms(configs, cd, ["LINHAS", "PRODUZIDAS"], ["PREVISTAS", "NECESSARIO", "META"])
 
-    return [
-        {"label": "Dias úteis do mês", "value": str(int(total_days)), "sub": pd.to_datetime(ref_day).strftime("%m/%Y"), "class": "none", "tooltip": ""},
-        {"label": "Dias úteis realizados", "value": str(int(done_days)), "sub": f"Até {last_fill.strftime('%d/%m/%Y')}" if last_fill else "Sem preenchimento no mês", "class": "none", "tooltip": ""},
+    metrics = [
+        {"label": "Dias úteis do mês", "value": str(int(total_days)), "sub": pd.to_datetime(ref_day).strftime("%m/%Y"), "class": "none"},
+        {"label": "Dias úteis realizados", "value": str(int(done_days)), "sub": f"Até {last_fill.strftime('%d/%m/%Y')}" if last_fill else "Sem preenchimento no mês", "class": "none"},
         _objective_metric_payload("Objetivo de faturamento do mês", fat_obj, fat_actual, configs, vals, cd, ref_day, "Realizado", "moeda", runtime_cache=runtime_cache),
         _objective_metric_payload("Objetivo de linhas previstas do mês", linhas_obj, linhas_actual, configs, vals, cd, ref_day, "Planejado", "numero", runtime_cache=runtime_cache),
     ]
-
-
-def render_dashboard_month_north_metrics(cd: str, configs: pd.DataFrame, vals: pd.DataFrame, ref_day: date, runtime_cache: Optional[dict[str, Any]] = None) -> None:
-    metrics = dashboard_month_north_metrics_payload(cd, configs, vals, ref_day, runtime_cache=runtime_cache)
 
     st.markdown("### Norteadores do mês")
     cols = st.columns(4, gap="medium")
@@ -6111,8 +5589,6 @@ def page_dashboard() -> None:
         with f2:
             view_choice = st.selectbox("Visão do dashboard", options, key=view_key)
 
-    dashboard_export_slot = st.empty()
-
     today = date.today()
     yesterday = previous_working_day(cd, today)
     month_start = today.replace(day=1)
@@ -6180,58 +5656,21 @@ def page_dashboard() -> None:
     selected = ordered_dashboard_df_from_labels(all_candidates, selected_labels) if not all_candidates.empty else pd.DataFrame()
 
     vals = load_values([cd], month_start.isoformat(), today.isoformat())
-    latest_filled_dashboard = latest_filled_date_from_values(vals, today)
-    if latest_filled_dashboard is not None and latest_filled_dashboard >= month_start:
-        ref_day_dashboard = latest_filled_dashboard
-    else:
-        ref_day_dashboard = yesterday if yesterday >= month_start else today
+    ref_day_dashboard = yesterday if yesterday >= month_start else today
     runtime_cache = build_dashboard_runtime_cache(vals, cfg_all, cd, month_start.isoformat(), today.isoformat())
+    render_dashboard_month_north_metrics(cd, cfg_all, vals, ref_day_dashboard, runtime_cache=runtime_cache)
 
     if selected.empty:
         st.warning("Nenhum card selecionado para exibição nesta visão.")
     else:
-        north_payloads = dashboard_month_north_metrics_payload(cd, cfg_all, vals, ref_day_dashboard, runtime_cache=runtime_cache)
-        day_payloads = build_dashboard_card_payloads(
-            selected,
-            vals,
-            cfg_all,
-            cd,
-            ref_day_dashboard.isoformat(),
-            ref_day_dashboard.isoformat(),
-            "latest",
-            runtime_cache=runtime_cache,
-        )
-        month_payloads = build_dashboard_card_payloads(
-            selected,
-            vals,
-            cfg_all,
-            cd,
-            month_start.isoformat(),
-            today.isoformat(),
-            "auto_month",
-            runtime_cache=runtime_cache,
-        )
-        export_png = _payload_sections_to_png(
-            f"Dashboard Executivo - CD {cd}",
-            [
-                ("Norteadores do mês", north_payloads),
-                (f"Resultado de ontem · {br_date_label(ref_day_dashboard.isoformat())}", day_payloads),
-                ("Acumulado do mês", month_payloads),
-            ],
-            subtitle=f"Visão: {view_choice} · Referência: {br_date_label(ref_day_dashboard.isoformat())}",
-        )
-        with dashboard_export_slot.container():
-            render_visual_export_buttons(f"dashboard_export_{cd}_{ref_day_dashboard.isoformat()}", f"dashboard_{cd}_{ref_day_dashboard.isoformat()}", export_png)
-
-        render_dashboard_month_north_metrics(cd, cfg_all, vals, ref_day_dashboard, runtime_cache=runtime_cache)
         render_dashboard_card_grid(
-            f"Resultado de ontem · {br_date_label(ref_day_dashboard.isoformat())}",
+            f"Resultado de ontem · {br_date_label(yesterday.isoformat())}",
             selected,
             vals,
             cfg_all,
             cd,
-            ref_day_dashboard.isoformat(),
-            ref_day_dashboard.isoformat(),
+            yesterday.isoformat(),
+            yesterday.isoformat(),
             "latest",
             runtime_cache=runtime_cache,
         )
@@ -7543,55 +6982,1195 @@ def page_daily() -> None:
 
 
 def page_monthly() -> None:
-    render_header("Visão Mensal", "Consolidado mês a mês por indicador, CD e visão executiva.")
+    """Visão Mensal analítica.
+
+    Esta página não depende mais das visões executivas para restringir indicadores.
+    Ela monta a análise a partir de todos os campos cadastrados e/ou preenchidos,
+    permitindo comparar cada indicador contra meta cadastrada ou outro campo.
+    """
+    import plotly.graph_objects as go
+    import json
+
+    render_header("Visão Mensal", "Análise mensal por indicador, CD, meta e referência operacional.")
+    st.caption("BUILD: Visão Mensal Analítica V6 Tableau Views — se esta linha aparece, o app.py correto está rodando.")
     centers = allowed_centers(st.session_state["user"]["username"])
     if not centers:
         st.warning("Usuário sem CD liberado.")
         return
+
+    def _monthly_norm(value: Any) -> str:
+        s = unicodedata.normalize("NFKD", str(value or ""))
+        s = s.encode("ascii", "ignore").decode("ascii").upper().strip()
+        return re.sub(r"\s+", " ", s)
+
+    def _field_key_from_parts(code: Any, grupo: Any, indicador: Any) -> str:
+        code_s = str(code or "").strip().upper()
+        if code_s and code_s.lower() not in {"nan", "none"}:
+            return f"COD::{code_s}"
+        return f"NOME::{_monthly_norm(grupo)}::{_monthly_norm(indicador)}"
+
+    def _short_label(label: str) -> str:
+        parts = [p.strip() for p in str(label).split(" · ") if p.strip()]
+        if len(parts) >= 2:
+            return parts[-2] if parts[-1].upper().startswith("G") else parts[-1]
+        return str(label)
+
+    def _auto_mode_from_text(indicador: Any, formato: Any, requested: str) -> str:
+        if requested == "Soma":
+            return "sum"
+        if requested == "Média":
+            return "mean"
+        text = _monthly_norm(indicador)
+        fmt = str(formato or "").strip().lower()
+        if fmt == "percentual" or "%" in text or "PERFORMANCE" in text or "ATINGIMENTO" in text:
+            return "mean"
+        return "sum"
+
+    def _aggregate_chart(df: pd.DataFrame, group_cols: list[str], requested: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        rows: list[dict[str, Any]] = []
+        present_cols = [c for c in group_cols if c in df.columns]
+        if not present_cols:
+            return pd.DataFrame()
+        for keys, g in df.groupby(present_cols, dropna=False, sort=False):
+            if not isinstance(keys, tuple):
+                keys = (keys,)
+            rec = {col: val for col, val in zip(present_cols, keys)}
+            vals_num = pd.to_numeric(g["valor"], errors="coerce").dropna()
+            if vals_num.empty:
+                continue
+            mode = _auto_mode_from_text(
+                g["indicador_analisado"].iloc[0] if "indicador_analisado" in g.columns else "",
+                g["formato"].iloc[0] if "formato" in g.columns else "",
+                requested,
+            )
+            rec["valor"] = float(vals_num.mean() if mode == "mean" else vals_num.sum())
+            rec["modo_consolidacao"] = "Média" if mode == "mean" else "Soma"
+            if "formato" in g.columns:
+                rec["formato"] = str(g["formato"].iloc[0] or "numero")
+            rows.append(rec)
+        return pd.DataFrame(rows)
+
+    def _build_monthly_executive_summary(
+        table_df: pd.DataFrame,
+        start_d: Any = None,
+        end_d: Any = None,
+        consolidacao: str = "Automático",
+    ) -> pd.DataFrame:
+        """Resumo executivo local da Visão Mensal.
+
+        Fica dentro de page_monthly para eliminar NameError quando o app.py local
+        ainda não recebeu a função global de suporte.
+        """
+        if table_df is None or table_df.empty:
+            return pd.DataFrame(
+                columns=[
+                    "CD", "Indicador", "Consolidação", "Valor consolidado", "Referência consolidada",
+                    "Diferença", "% Atingimento", "Status", "Leitura gerencial",
+                ]
+            )
+
+        df = table_df.copy()
+        for col in ["Valor analisado", "Valor referência", "Diferença", "% Atingimento"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        group_cols = [c for c in ["CD", "Indicador"] if c in df.columns]
+        if not group_cols:
+            return pd.DataFrame()
+
+        def _mode(indicador: Any) -> str:
+            requested = str(consolidacao or "Automático")
+            if requested == "Soma":
+                return "sum"
+            if requested == "Média":
+                return "mean"
+            txt = unicodedata.normalize("NFKD", str(indicador or ""))
+            txt = txt.encode("ascii", "ignore").decode("ascii").upper()
+            if any(k in txt for k in ["%", "PERCENT", "PERFORMANCE", "ATINGIMENTO", "SLA", "NIVEL"]):
+                return "mean"
+            return "sum"
+
+        rows: list[dict[str, Any]] = []
+        for keys, g in df.groupby(group_cols, dropna=False, sort=False):
+            if not isinstance(keys, tuple):
+                keys = (keys,)
+            key_map = {col: val for col, val in zip(group_cols, keys)}
+            indicador = key_map.get("Indicador", "")
+            mode = _mode(indicador)
+            actual_values = g["Valor analisado"].dropna() if "Valor analisado" in g.columns else pd.Series(dtype=float)
+            ref_values = g["Valor referência"].dropna() if "Valor referência" in g.columns else pd.Series(dtype=float)
+            if actual_values.empty:
+                continue
+
+            actual = float(actual_values.mean() if mode == "mean" else actual_values.sum())
+            ref = None if ref_values.empty else float(ref_values.mean() if mode == "mean" else ref_values.sum())
+            diff = None if ref is None else actual - ref
+            pct = None if ref is None or abs(float(ref)) < 1e-12 else actual / float(ref)
+
+            status = "Sem referência"
+            if pct is not None:
+                if pct >= 1:
+                    status = "Dentro"
+                elif pct >= 0.95:
+                    status = "Atenção"
+                else:
+                    status = "Fora"
+
+            periodo = ""
+            if start_d and end_d:
+                try:
+                    periodo = f"{pd.to_datetime(start_d).strftime('%d/%m/%Y')} a {pd.to_datetime(end_d).strftime('%d/%m/%Y')}"
+                except Exception:
+                    periodo = ""
+
+            actual_txt = format_value(actual, "numero", str(indicador))
+            ref_txt = "" if ref is None else format_value(ref, "numero", str(indicador))
+            pct_txt = "" if pct is None else format_value(pct, "percentual", "% atingimento")
+            if ref is None:
+                leitura = f"{indicador}: consolidado de {actual_txt} no período {periodo}. Sem referência configurada."
+            else:
+                leitura = f"{indicador}: consolidado de {actual_txt} contra referência de {ref_txt}; atingimento {pct_txt}."
+
+            rows.append({
+                "CD": key_map.get("CD", ""),
+                "Indicador": indicador,
+                "Consolidação": "Média" if mode == "mean" else "Soma",
+                "Valor consolidado": actual,
+                "Valor consolidado formatado": actual_txt,
+                "Referência consolidada": ref,
+                "Referência formatada": ref_txt,
+                "Diferença": diff,
+                "% Atingimento": pct,
+                "% Atingimento formatado": pct_txt,
+                "Status": status,
+                "Leitura gerencial": leitura,
+            })
+
+        return pd.DataFrame(rows)
+
+    def _load_all_fields(configs: pd.DataFrame, vals_all: pd.DataFrame, selected_cds: list[str]) -> tuple[list[str], dict[str, dict[str, Any]]]:
+        fields: dict[str, dict[str, Any]] = {}
+
+        cfg_scope = configs.copy() if configs is not None else pd.DataFrame()
+        if not cfg_scope.empty:
+            cfg_scope = cfg_scope[cfg_scope["cd"].astype(str).isin([str(c) for c in selected_cds])].copy()
+            if "indicador" in cfg_scope.columns:
+                cfg_scope = cfg_scope[cfg_scope["indicador"].astype(str).ne("__CABECALHO__")].copy()
+            if "ativo" in cfg_scope.columns:
+                # Lista todos os campos ativos; não limita por visão executiva.
+                cfg_scope = cfg_scope[cfg_scope["ativo"].fillna(1).astype(int).eq(1)].copy()
+            sort_cols = [c for c in ["grupo_ordem", "grupo", "indicador_ordem", "indicador"] if c in cfg_scope.columns]
+            if sort_cols:
+                cfg_scope = cfg_scope.sort_values(sort_cols, kind="stable")
+            for _, r in cfg_scope.iterrows():
+                code = str(r.get("codigo_indicador") or "").strip()
+                grupo = str(r.get("grupo") or "").strip()
+                indicador = str(r.get("indicador") or "").strip()
+                if not indicador:
+                    continue
+                key = _field_key_from_parts(code, grupo, indicador)
+                label = f"{grupo} · {indicador}"
+                if code:
+                    label = f"{label} · {code}"
+                if key not in fields:
+                    fields[key] = {
+                        "key": key,
+                        "label": label,
+                        "codigo_indicador": code,
+                        "grupo": grupo,
+                        "indicador": indicador,
+                        "formato": str(r.get("formato") or "numero"),
+                        "tipo_campo": str(r.get("tipo_campo") or "dado_diario"),
+                        "source": "config",
+                    }
+
+        vals_scope = vals_all.copy() if vals_all is not None else pd.DataFrame()
+        if not vals_scope.empty:
+            for _, r in vals_scope.drop_duplicates(subset=[c for c in ["codigo_indicador", "grupo", "indicador"] if c in vals_scope.columns]).iterrows():
+                code = str(r.get("codigo_indicador") or "").strip() if "codigo_indicador" in vals_scope.columns else ""
+                grupo = str(r.get("grupo") or "").strip()
+                indicador = str(r.get("indicador") or "").strip()
+                if not indicador:
+                    continue
+                key = _field_key_from_parts(code, grupo, indicador)
+                if key not in fields:
+                    label = f"{grupo} · {indicador}"
+                    if code:
+                        label = f"{label} · {code}"
+                    fields[key] = {
+                        "key": key,
+                        "label": label,
+                        "codigo_indicador": code,
+                        "grupo": grupo,
+                        "indicador": indicador,
+                        "formato": "numero",
+                        "tipo_campo": "dado_diario",
+                        "source": "values",
+                    }
+
+        labels = [v["label"] for v in fields.values()]
+        # Garante rótulos únicos mesmo quando o código está ausente.
+        seen: dict[str, int] = {}
+        label_map: dict[str, dict[str, Any]] = {}
+        for item in fields.values():
+            label = str(item["label"])
+            seen[label] = seen.get(label, 0) + 1
+            if seen[label] > 1:
+                label = f"{label} · #{seen[label]}"
+            item = dict(item)
+            item["label"] = label
+            label_map[label] = item
+        return list(label_map.keys()), label_map
+
+    def _find_cfg_for_field(configs: pd.DataFrame, cd: str, field: dict[str, Any]) -> Optional[pd.Series]:
+        if configs is None or configs.empty:
+            return None
+        scope = configs[configs["cd"].astype(str).eq(str(cd))].copy()
+        if scope.empty:
+            return None
+        if "indicador" in scope.columns:
+            scope = scope[scope["indicador"].astype(str).ne("__CABECALHO__")].copy()
+        code = str(field.get("codigo_indicador") or "").strip().upper()
+        if code and "codigo_indicador" in scope.columns:
+            hit = scope[scope["codigo_indicador"].fillna("").astype(str).str.strip().str.upper().eq(code)]
+            if not hit.empty:
+                return hit.iloc[0]
+        grupo_norm = _monthly_norm(field.get("grupo"))
+        indicador_norm = _monthly_norm(field.get("indicador"))
+        if grupo_norm and indicador_norm:
+            hit = scope[
+                scope["grupo"].astype(str).map(_monthly_norm).eq(grupo_norm)
+                & scope["indicador"].astype(str).map(_monthly_norm).eq(indicador_norm)
+            ]
+            if not hit.empty:
+                return hit.iloc[0]
+        return None
+
+    def _raw_value_for_field(vals_window: pd.DataFrame, cd: str, field: dict[str, Any], day: date) -> Optional[float]:
+        if vals_window is None or vals_window.empty:
+            return None
+        ds = day.isoformat()
+        sub = vals_window[(vals_window["cd"].astype(str).eq(str(cd))) & (vals_window["data"].astype(str).eq(ds))].copy()
+        if sub.empty:
+            return None
+        code = str(field.get("codigo_indicador") or "").strip()
+        if code and "codigo_indicador" in sub.columns:
+            hit = sub[sub["codigo_indicador"].fillna("").astype(str).str.strip().str.upper().eq(code.upper())]
+            if not hit.empty:
+                val = hit.sort_values("id").iloc[-1].get("valor")
+                return None if val is None or pd.isna(val) else float(val)
+        grupo_norm = _monthly_norm(field.get("grupo"))
+        indicador_norm = _monthly_norm(field.get("indicador"))
+        hit = sub[
+            sub["grupo"].astype(str).map(_monthly_norm).eq(grupo_norm)
+            & sub["indicador"].astype(str).map(_monthly_norm).eq(indicador_norm)
+        ]
+        if hit.empty:
+            return None
+        val = hit.sort_values("id").iloc[-1].get("valor")
+        return None if val is None or pd.isna(val) else float(val)
+
+    def _value_for_field(
+        vals_window: pd.DataFrame,
+        configs: pd.DataFrame,
+        cd: str,
+        field: dict[str, Any],
+        day: date,
+        calc_by_cd_date: dict[tuple[str, str], dict[tuple[str, str], float]],
+        target_maps_by_cd_date: dict[tuple[str, str], dict[tuple[str, str, str], dict]],
+    ) -> tuple[Optional[float], str, str, str]:
+        cfgrow = _find_cfg_for_field(configs, cd, field)
+        if cfgrow is not None:
+            ds = day.isoformat()
+            value = matrix_value_for_day(
+                vals_window,
+                configs,
+                {ds: calc_by_cd_date.get((str(cd), ds), {})},
+                {ds: target_maps_by_cd_date.get((str(cd), ds), {})},
+                cd,
+                cfgrow,
+                day,
+            )
+            return (
+                None if value is None or pd.isna(value) else float(value),
+                str(cfgrow.get("formato") or field.get("formato") or "numero"),
+                str(cfgrow.get("tipo_campo") or field.get("tipo_campo") or "dado_diario"),
+                str(cfgrow.get("indicador") or field.get("indicador") or ""),
+            )
+        value = _raw_value_for_field(vals_window, cd, field, day)
+        return (
+            None if value is None or pd.isna(value) else float(value),
+            str(field.get("formato") or "numero"),
+            str(field.get("tipo_campo") or "dado_diario"),
+            str(field.get("indicador") or ""),
+        )
+
+    def _meta_value_for_field(
+        configs: pd.DataFrame,
+        cd: str,
+        field: dict[str, Any],
+        day: date,
+        target_maps_by_cd_date: dict[tuple[str, str], dict[tuple[str, str, str], dict]],
+    ) -> tuple[Optional[float], str]:
+        cfgrow = _find_cfg_for_field(configs, cd, field)
+        if cfgrow is None:
+            return None, str(field.get("formato") or "numero")
+        target = target_for_matrix_row_cached(cd, cfgrow, day.isoformat(), target_maps_by_cd_date.get((str(cd), day.isoformat()), {}))
+        if not target or target.get("valor_meta") is None or pd.isna(target.get("valor_meta")):
+            return None, str(cfgrow.get("formato") or field.get("formato") or "numero")
+        return float(target["valor_meta"]), str(cfgrow.get("formato") or field.get("formato") or "numero")
+
+    def _monthly_color_palettes() -> dict[str, list[str]]:
+        """Paletas disponíveis para os gráficos da Visão Mensal."""
+        return {
+            "Plotly padrão": px.colors.qualitative.Plotly,
+            "Cores primárias": ["#0057B8", "#D50032", "#FFD100", "#009A44", "#6C3BAA", "#00A3E0"],
+            "BR Supply": [BR_ORANGE, BR_DARK, "#FFB26B", "#8A4B16", "#6B7280", "#111827", "#FDD9B5"],
+            "BR Supply + status": [BR_ORANGE, BR_DARK, "#22C55E", "#F5B301", "#E11D48", "#6B7280", "#94A3B8"],
+            "Cinza executivo": [BR_DARK, "#4B5563", "#6B7280", "#9CA3AF", "#D1D5DB", BR_ORANGE],
+        }
+
+    def _palette_options() -> list[str]:
+        return list(_monthly_color_palettes().keys())
+
+    def _palette_colors(palette_name: str) -> list[str]:
+        palettes = _monthly_color_palettes()
+        return list(palettes.get(str(palette_name), palettes["Plotly padrão"]))
+
+    def _build_series_color_map(series_names: list[str], palette_name: str) -> dict[str, str]:
+        colors = _palette_colors(palette_name)
+        if not colors:
+            colors = [BR_ORANGE, BR_DARK]
+        return {str(name): colors[i % len(colors)] for i, name in enumerate(series_names)}
+
+    def _plot_time(title: str, df: pd.DataFrame, chart_kind: str, y_col: str = "valor", palette_name: str = "Plotly padrão") -> None:
+        if df is None or df.empty:
+            st.info(f"Sem dados para `{title}`.")
+            return
+        plot_df = df.dropna(subset=[y_col]).copy()
+        if plot_df.empty:
+            st.info(f"Sem dados para `{title}`.")
+            return
+
+        if "indicador_analisado" not in plot_df.columns:
+            plot_df["indicador_analisado"] = title
+        if "data_dt" not in plot_df.columns:
+            st.info(f"Sem eixo de data para `{title}`.")
+            return
+
+        plot_df["data_dt"] = pd.to_datetime(plot_df["data_dt"], errors="coerce")
+        plot_df = plot_df.dropna(subset=["data_dt"]).copy()
+        plot_df["data_label_exata"] = plot_df["data_dt"].dt.strftime("%d/%m/%Y")
+        plot_df = plot_df.sort_values(["indicador_analisado", "data_dt", "cd", "serie_nome"], kind="stable")
+
+        st.markdown(f"### {title}")
+        st.caption("Cada indicador é renderizado como uma planilha visual própria, no padrão de leitura tipo Tableau. A escala Y pode ser ajustada individualmente.")
+
+        for indicador_nome, sheet_df in plot_df.groupby("indicador_analisado", sort=False):
+            sheet_df = sheet_df.copy()
+            if sheet_df.empty:
+                continue
+
+            key_hash = hashlib.md5(f"{title}|{indicador_nome}|{y_col}".encode("utf-8")).hexdigest()[:10]
+            metric_df = sheet_df[sheet_df.get("tipo_serie", "Indicador").eq("Indicador")].copy() if "tipo_serie" in sheet_df.columns else sheet_df.copy()
+            if metric_df.empty:
+                metric_df = sheet_df.copy()
+            metric_df = metric_df.sort_values("data_dt", kind="stable")
+            fmt = str(metric_df["formato"].dropna().iloc[0]) if "formato" in metric_df.columns and not metric_df["formato"].dropna().empty else "numero"
+            vals_metric = pd.to_numeric(metric_df[y_col], errors="coerce").dropna()
+            ultimo = float(metric_df.dropna(subset=[y_col]).sort_values("data_dt", kind="stable").iloc[-1][y_col]) if not metric_df.dropna(subset=[y_col]).empty else None
+            media = float(vals_metric.mean()) if not vals_metric.empty else None
+            minimo = float(vals_metric.min()) if not vals_metric.empty else None
+            maximo = float(vals_metric.max()) if not vals_metric.empty else None
+            qtd_datas = int(sheet_df["data_dt"].nunique())
+            qtd_series = int(sheet_df["serie_nome"].nunique()) if "serie_nome" in sheet_df.columns else 1
+
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='font-size:1.02rem;font-weight:850;color:{BR_DARK};margin-bottom:.15rem;'>{html.escape(str(indicador_nome))}</div>"
+                    f"<div style='font-size:.80rem;color:#6b7280;margin-bottom:.65rem;'>"
+                    f"{html.escape(str(chart_kind))} · {qtd_datas} data(s) · {qtd_series} série(s)</div>",
+                    unsafe_allow_html=True,
+                )
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Último", format_value(ultimo, fmt, str(indicador_nome)) or "—")
+                m2.metric("Média", format_value(media, fmt, str(indicador_nome)) or "—")
+                m3.metric("Mínimo", format_value(minimo, fmt, str(indicador_nome)) or "—")
+                m4.metric("Máximo", format_value(maximo, fmt, str(indicador_nome)) or "—")
+
+                cscale1, cscale2, cscale3, cscale4 = st.columns([1.1, 1, 1, 1.35])
+                with cscale1:
+                    fix_scale = st.checkbox("Fixar escala Y", value=False, key=f"monthly_y_fix_{key_hash}")
+                y_min = None
+                y_max = None
+                if fix_scale:
+                    default_min = float(minimo if minimo is not None else 0.0)
+                    default_max = float(maximo if maximo is not None else max(default_min + 1.0, 1.0))
+                    if abs(default_max - default_min) < 1e-12:
+                        default_max = default_min + 1.0
+                    with cscale2:
+                        y_min = st.number_input("Y mínimo", value=default_min, format="%.6f", key=f"monthly_y_min_{key_hash}")
+                    with cscale3:
+                        y_max = st.number_input("Y máximo", value=default_max, format="%.6f", key=f"monthly_y_max_{key_hash}")
+                    if y_max <= y_min:
+                        st.warning("O máximo do eixo Y precisa ser maior que o mínimo. Mantive a escala automática para este gráfico.")
+                        y_min = y_max = None
+                with cscale4:
+                    palette_local = st.selectbox(
+                        "Paleta",
+                        _palette_options(),
+                        index=_palette_options().index(palette_name) if palette_name in _palette_options() else 0,
+                        key=f"monthly_palette_{key_hash}",
+                    )
+
+                series_names = [str(x) for x in sheet_df["serie_nome"].dropna().astype(str).unique().tolist()] if "serie_nome" in sheet_df.columns else [str(indicador_nome)]
+                series_color_map = _build_series_color_map(series_names, palette_local)
+                manual_colors = st.checkbox("Editar cores das séries deste gráfico", value=False, key=f"monthly_manual_colors_{key_hash}")
+                if manual_colors and series_names:
+                    color_cols = st.columns(min(3, max(1, len(series_names))))
+                    for i, series_name in enumerate(series_names):
+                        with color_cols[i % len(color_cols)]:
+                            series_color_map[series_name] = st.color_picker(
+                                str(series_name)[:38],
+                                value=series_color_map.get(series_name, BR_ORANGE),
+                                key=f"monthly_color_{key_hash}_{hashlib.md5(series_name.encode('utf-8')).hexdigest()[:8]}",
+                            )
+
+                fig = go.Figure()
+                if chart_kind == "Barras":
+                    base_df = sheet_df[sheet_df["tipo_serie"].eq("Indicador")].copy() if "tipo_serie" in sheet_df.columns else sheet_df.copy()
+                    ref_df = sheet_df[sheet_df["tipo_serie"].ne("Indicador")].copy() if "tipo_serie" in sheet_df.columns else pd.DataFrame()
+                    for name, g in base_df.groupby("serie_nome", sort=False):
+                        series_name = str(name)
+                        fig.add_trace(go.Bar(
+                            x=g["data_dt"],
+                            y=g[y_col],
+                            name=series_name,
+                            marker_color=series_color_map.get(series_name),
+                            customdata=g[["cd", "data_label_exata"]],
+                            hovertemplate="%{customdata[1]}<br>CD: %{customdata[0]}<br>Valor: %{y}<extra>%{fullData.name}</extra>",
+                        ))
+                    for name, g in ref_df.groupby("serie_nome", sort=False):
+                        series_name = str(name)
+                        fig.add_trace(go.Scatter(
+                            x=g["data_dt"],
+                            y=g[y_col],
+                            name=series_name,
+                            mode="lines+markers",
+                            line=dict(color=series_color_map.get(series_name)),
+                            marker=dict(color=series_color_map.get(series_name)),
+                            customdata=g[["cd", "data_label_exata"]],
+                            hovertemplate="%{customdata[1]}<br>CD: %{customdata[0]}<br>Valor: %{y}<extra>%{fullData.name}</extra>",
+                        ))
+                    fig.update_layout(barmode="group")
+                else:
+                    for name, g in sheet_df.groupby("serie_nome", sort=False):
+                        series_name = str(name)
+                        fig.add_trace(go.Scatter(
+                            x=g["data_dt"],
+                            y=g[y_col],
+                            name=series_name,
+                            mode="lines+markers",
+                            line=dict(color=series_color_map.get(series_name)),
+                            marker=dict(color=series_color_map.get(series_name)),
+                            customdata=g[["cd", "data_label_exata"]],
+                            hovertemplate="%{customdata[1]}<br>CD: %{customdata[0]}<br>Valor: %{y}<extra>%{fullData.name}</extra>",
+                        ))
+
+                tick_vals = sorted(sheet_df["data_dt"].dropna().unique().tolist())
+                tick_text = [pd.to_datetime(x).strftime("%d/%m/%Y") for x in tick_vals]
+                fig.update_layout(
+                    title=None,
+                    xaxis_title="Data",
+                    yaxis_title="Valor",
+                    legend_title_text="Série",
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    height=430,
+                )
+                fig.update_xaxes(tickmode="array", tickvals=tick_vals, ticktext=tick_text, tickangle=-45)
+                if y_min is not None and y_max is not None:
+                    fig.update_yaxes(range=[float(y_min), float(y_max)])
+                st.plotly_chart(fig, use_container_width=True)
+
+    def _plot_bar(title: str, df: pd.DataFrame, x_col: str, y_col: str = "valor", color_col: str = "serie_nome", palette_name: str = "Plotly padrão") -> None:
+        if df is None or df.empty:
+            st.info(f"Sem dados para `{title}`.")
+            return
+        plot_df = df.dropna(subset=[y_col]).copy()
+        if plot_df.empty:
+            st.info(f"Sem dados para `{title}`.")
+            return
+        fig = px.bar(plot_df, x=x_col, y=y_col, color=color_col, barmode="group", title=title, color_discrete_sequence=_palette_colors(palette_name))
+        fig.update_layout(xaxis_title="", yaxis_title="Valor", legend_title_text="Série", margin=dict(l=10, r=10, t=60, b=10), height=430)
+        st.plotly_chart(fig, use_container_width=True)
+
+    def _monthly_view_tables_ready() -> None:
+        """Garante tabelas locais para salvar visões mensais de gráficos."""
+        conn = get_conn()
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS monthly_chart_views (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    cd TEXT NOT NULL DEFAULT 'TODOS',
+                    nome TEXT NOT NULL,
+                    descricao TEXT,
+                    config_json TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    created_by TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT,
+                    updated_at TEXT,
+                    UNIQUE(username, cd, nome)
+                );
+                """
+            )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(monthly_chart_views)").fetchall()}
+            if "is_default" not in cols:
+                conn.execute("ALTER TABLE monthly_chart_views ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+            if "created_by" not in cols:
+                conn.execute("ALTER TABLE monthly_chart_views ADD COLUMN created_by TEXT")
+            if "updated_by" not in cols:
+                conn.execute("ALTER TABLE monthly_chart_views ADD COLUMN updated_by TEXT")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _monthly_view_cd_key(cd_choice_value: str) -> str:
+        return "TODOS" if str(cd_choice_value or "Todos") == "Todos" else str(cd_choice_value)
+
+    def _safe_json_loads(value: Any) -> dict[str, Any]:
+        try:
+            data = json.loads(str(value or "{}"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _load_monthly_chart_views(username: str, cd_key: str) -> pd.DataFrame:
+        _monthly_view_tables_ready()
+        owners = [GLOBAL_DASHBOARD_USERNAME]
+        if str(username) != GLOBAL_DASHBOARD_USERNAME:
+            owners.append(str(username))
+        cd_options = [str(cd_key)]
+        if str(cd_key) != "TODOS":
+            cd_options.append("TODOS")
+        owner_ph = ",".join(["?"] * len(owners))
+        cd_ph = ",".join(["?"] * len(cd_options))
+        conn = get_conn()
+        try:
+            df = pd.read_sql_query(
+                f"""
+                SELECT *,
+                       CASE WHEN username=? THEN 'Todos os usuários' ELSE 'Somente para mim' END AS escopo_visao
+                  FROM monthly_chart_views
+                 WHERE active=1
+                   AND username IN ({owner_ph})
+                   AND cd IN ({cd_ph})
+                 ORDER BY is_default DESC,
+                          CASE WHEN username=? THEN 0 ELSE 1 END,
+                          CASE WHEN cd=? THEN 0 ELSE 1 END,
+                          nome
+                """,
+                conn,
+                params=(GLOBAL_DASHBOARD_USERNAME, *owners, *cd_options, GLOBAL_DASHBOARD_USERNAME, str(cd_key)),
+            )
+            return df
+        finally:
+            conn.close()
+
+    def _save_monthly_chart_view(
+        owner_username: str,
+        cd_key: str,
+        nome: str,
+        descricao: str,
+        payload: dict[str, Any],
+        is_default: bool,
+        user: str,
+    ) -> int:
+        if not str(nome or "").strip():
+            raise ValueError("Informe o nome da visão.")
+        _monthly_view_tables_ready()
+        now = now_iso()
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        conn = get_conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO monthly_chart_views(username, cd, nome, descricao, config_json, active, is_default, created_by, created_at, updated_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                ON CONFLICT(username, cd, nome) DO UPDATE SET
+                    descricao=excluded.descricao,
+                    config_json=excluded.config_json,
+                    active=1,
+                    is_default=excluded.is_default,
+                    updated_by=excluded.updated_by,
+                    updated_at=excluded.updated_at
+                """,
+                (owner_username, cd_key, nome.strip(), str(descricao or "").strip(), payload_json, int(bool(is_default)), user, now, user, now),
+            )
+            if is_default:
+                conn.execute(
+                    "UPDATE monthly_chart_views SET is_default=0, updated_by=?, updated_at=? WHERE username=? AND cd=? AND nome<>?",
+                    (user, now, owner_username, cd_key, nome.strip()),
+                )
+            row = conn.execute(
+                "SELECT id FROM monthly_chart_views WHERE username=? AND cd=? AND nome=?",
+                (owner_username, cd_key, nome.strip()),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO config_audit(entidade, cd, grupo, indicador, campo, valor_anterior, valor_novo, motivo, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("monthly_chart_view", cd_key, None, None, "config_json", None, nome.strip(), descricao.strip() or "Visão mensal salva", user, now),
+            )
+            conn.commit()
+            return int(row["id"]) if row else 0
+        finally:
+            conn.close()
+
+    def _inactivate_monthly_chart_view(view_id: int, user: str) -> None:
+        _monthly_view_tables_ready()
+        now = now_iso()
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT * FROM monthly_chart_views WHERE id=?", (int(view_id),)).fetchone()
+            if row is None:
+                raise ValueError("Visão mensal não encontrada.")
+            conn.execute("UPDATE monthly_chart_views SET active=0, updated_by=?, updated_at=? WHERE id=?", (user, now, int(view_id)))
+            conn.execute(
+                "INSERT INTO config_audit(entidade, cd, grupo, indicador, campo, valor_anterior, valor_novo, motivo, changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("monthly_chart_view", row["cd"], None, None, "active", "1", "0", "Inativação de visão mensal", user, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _apply_monthly_chart_view_to_state(payload: dict[str, Any], all_labels_scope: list[str], chart_options_scope: list[str]) -> None:
+        """Aplica a visão salva antes da criação dos widgets da página."""
+        labels_set = {str(x) for x in all_labels_scope}
+        charts = [str(x) for x in payload.get("visible_charts", []) if str(x) in chart_options_scope]
+        if charts:
+            st.session_state["monthly_visible_charts"] = charts
+        saved_map = payload.get("chart_indicator_map", {})
+        if isinstance(saved_map, dict):
+            for chart_name in chart_options_scope:
+                chart_key = hashlib.md5(str(chart_name).encode("utf-8")).hexdigest()[:8]
+                values = [str(x) for x in saved_map.get(chart_name, []) if str(x) in labels_set]
+                st.session_state[f"monthly_indicators_for_chart_{chart_key}"] = values
+        pending_top_settings: dict[str, str] = {}
+        if str(payload.get("consolidacao") or "") in ["Automático", "Soma", "Média"]:
+            pending_top_settings["monthly_consolidacao"] = str(payload.get("consolidacao"))
+        if str(payload.get("chart_kind") or "") in ["Barras", "Linha"]:
+            pending_top_settings["monthly_chart_kind"] = str(payload.get("chart_kind"))
+        if str(payload.get("chart_palette") or "") in _palette_options():
+            pending_top_settings["monthly_chart_palette"] = str(payload.get("chart_palette"))
+        if pending_top_settings:
+            st.session_state["monthly_pending_top_settings"] = pending_top_settings
+            st.session_state["monthly_top_settings_needs_rerun"] = True
+        ref_choices = payload.get("ref_choices", {})
+        st.session_state["monthly_pending_ref_choices"] = ref_choices if isinstance(ref_choices, dict) else {}
+
+    def _monthly_view_label(row: pd.Series) -> str:
+        default_txt = " · padrão" if bool(row.get("is_default", 0)) else ""
+        cd_txt = "Todos CDs" if str(row.get("cd") or "") == "TODOS" else str(row.get("cd") or "")
+        return f"{row.get('nome')} · {row.get('escopo_visao')} · {cd_txt}{default_txt}"
+
+
+    # Dados-base da página.
+    vals_all = load_values(centers)
+    if vals_all.empty:
+        st.info("Sem dados preenchidos para análise mensal.")
+        return
+    vals_all["data_dt"] = pd.to_datetime(vals_all["data"], errors="coerce").dt.date
+    vals_all = vals_all.dropna(subset=["data_dt"]).copy()
+
+    min_available = min(vals_all["data_dt"])
+    max_available = max(vals_all["data_dt"])
+    latest_month_start = date(max_available.year, max_available.month, 1)
+    default_start = max(min_available, latest_month_start)
+    default_end = max_available
+
+    pending_top_settings = st.session_state.pop("monthly_pending_top_settings", {}) if isinstance(st.session_state.get("monthly_pending_top_settings", {}), dict) else {}
+    for _pending_key, _pending_value in pending_top_settings.items():
+        if _pending_key in {"monthly_consolidacao", "monthly_chart_kind", "monthly_chart_palette"}:
+            st.session_state[_pending_key] = _pending_value
+
     with st.container(border=True):
-        f1, f2 = st.columns([1.15, 1.25], gap="large")
+        f1, f2, f3, f4, f5 = st.columns([1.0, 1.25, 1.05, 1.05, 1.15], gap="large")
         with f1:
             cd_choice = center_button_selector("CD", centers, "monthly_cd_button", include_all=True)
-        cd_for_view = centers[0] if cd_choice == "Todos" else cd_choice
+        selected_cds = centers if cd_choice == "Todos" else [cd_choice]
         with f2:
-            view_label, view_id = view_selector("mensal", cd_for_view, "monthly_view_selector")
-        st.caption("Use Todos para comparar CDs. A visão limita a lista de indicadores disponíveis.")
-    selected_cds = centers if cd_choice == "Todos" else [cd_choice]
-    vals = load_values(selected_cds)
-    if vals.empty:
-        st.info("Sem dados.")
-        if has_perm("configure_indicators"):
-            st.divider()
-            render_visualization_admin("mensal", cd_for_view, load_indicator_config(cd_for_view, active_only=False), "monthly_admin")
+            period = st.date_input(
+                "Período analisado",
+                value=(default_start, default_end),
+                min_value=min_available,
+                max_value=max_available,
+                key="monthly_analysis_period",
+            )
+        with f3:
+            consolidacao = st.selectbox("Consolidação", ["Automático", "Soma", "Média"], key="monthly_consolidacao")
+        with f4:
+            chart_kind = st.selectbox("Tipo de gráfico padrão", ["Barras", "Linha"], key="monthly_chart_kind")
+        with f5:
+            chart_palette = st.selectbox("Paleta de cores padrão", _palette_options(), index=1, key="monthly_chart_palette")
+
+    if isinstance(period, tuple) and len(period) == 2:
+        start_d, end_d = period
+    else:
+        start_d, end_d = default_start, default_end
+    if start_d > end_d:
+        start_d, end_d = end_d, start_d
+
+    vals_scope_all_dates = vals_all[vals_all["cd"].astype(str).isin([str(c) for c in selected_cds])].copy()
+    vals_window = vals_scope_all_dates[(vals_scope_all_dates["data_dt"] >= start_d) & (vals_scope_all_dates["data_dt"] <= end_d)].copy()
+    if vals_window.empty:
+        st.info("Sem dados preenchidos no período selecionado.")
         return
-    cfg_scope = load_indicator_config(cd_for_view)
-    cfg_scope = apply_visualization_view(cfg_scope, view_id)
-    if cfg_scope.empty:
-        st.info(f"A visão `{view_label}` não possui indicadores para o CD selecionado.")
-        if has_perm("configure_indicators"):
-            st.divider()
-            render_visualization_admin("mensal", cd_for_view, load_indicator_config(cd_for_view, active_only=False), "monthly_admin")
+
+    configs_all = load_indicator_config(active_only=False)
+    if configs_all is None or configs_all.empty:
+        configs_all = pd.DataFrame()
+
+    all_labels, label_map = _load_all_fields(configs_all, vals_scope_all_dates, selected_cds)
+    if not all_labels:
+        st.info("Não há indicadores/campos disponíveis para análise.")
         return
-    allowed_indicators = cfg_scope["indicador"].dropna().astype(str).unique().tolist()
-    vals = vals[vals["indicador"].astype(str).isin(allowed_indicators)].copy()
-    if vals.empty:
-        st.info("Sem dados carregados para os indicadores desta visão.")
-        if has_perm("configure_indicators"):
-            st.divider()
-            render_visualization_admin("mensal", cd_for_view, load_indicator_config(cd_for_view, active_only=False), "monthly_admin")
+
+    default_labels: list[str] = []
+    for label in all_labels:
+        label_upper = _monthly_norm(label)
+        if any(k in label_upper for k in ["FATURAMENTO REALIZADO", "LINHAS PLANEJADAS", "PERFORMANCE", "TOTAL ATRASOS"]):
+            default_labels.append(label)
+        if len(default_labels) >= 3:
+            break
+    if not default_labels:
+        default_labels = all_labels[: min(3, len(all_labels))]
+
+    chart_options = [
+        "Evolução diária",
+        "Realizado x Referência",
+        "Acumulado do mês",
+        "Comparativo mês a mês",
+        "Ranking do período",
+        "Tabela analítica",
+    ]
+
+    username = st.session_state["user"]["username"]
+    cd_view_key = _monthly_view_cd_key(cd_choice)
+    can_manage_global_monthly_view = (
+        st.session_state.get("user", {}).get("role") == "admin"
+        or has_perm("configure_indicators")
+        or has_perm("configure_targets")
+    )
+    saved_views_df = _load_monthly_chart_views(username, cd_view_key)
+
+    init_view_key = f"monthly_saved_view_initialized_{username}_{cd_view_key}"
+    if not st.session_state.get(init_view_key):
+        default_views = saved_views_df[saved_views_df["is_default"].fillna(0).astype(int).eq(1)].copy() if not saved_views_df.empty else pd.DataFrame()
+        if not default_views.empty:
+            # Prioriza padrão global; se não existir, usa padrão pessoal.
+            default_views["__owner_order"] = default_views["username"].astype(str).ne(GLOBAL_DASHBOARD_USERNAME).astype(int)
+            default_views = default_views.sort_values(["__owner_order", "nome"], kind="stable")
+            _apply_monthly_chart_view_to_state(_safe_json_loads(default_views.iloc[0]["config_json"]), all_labels, chart_options)
+        st.session_state[init_view_key] = True
+        if st.session_state.pop("monthly_top_settings_needs_rerun", False):
+            st.rerun()
+
+    with st.expander("Carregar visão mensal salva", expanded=False):
+        if saved_views_df.empty:
+            st.caption("Nenhuma visão mensal salva para este escopo de CD.")
+        else:
+            saved_label_to_id: dict[str, int] = {}
+            saved_label_to_payload: dict[str, dict[str, Any]] = {}
+            for _, vr in saved_views_df.iterrows():
+                label = _monthly_view_label(vr)
+                if label in saved_label_to_id:
+                    label = f"{label} · #{int(vr['id'])}"
+                saved_label_to_id[label] = int(vr["id"])
+                saved_label_to_payload[label] = _safe_json_loads(vr.get("config_json"))
+            selected_saved_view = st.selectbox("Visão salva", [""] + list(saved_label_to_id.keys()), key="monthly_saved_view_to_apply")
+            if st.button("Aplicar visão salva", type="primary", use_container_width=True, key="monthly_apply_saved_view"):
+                if selected_saved_view:
+                    _apply_monthly_chart_view_to_state(saved_label_to_payload[selected_saved_view], all_labels, chart_options)
+                    st.session_state.pop("monthly_top_settings_needs_rerun", None)
+                    st.success("Visão aplicada.")
+                    st.rerun()
+                else:
+                    st.warning("Selecione uma visão salva para aplicar.")
+
+    visible_charts = st.multiselect(
+        "Gráficos visíveis",
+        chart_options,
+        default=["Evolução diária", "Acumulado do mês", "Tabela analítica"],
+        key="monthly_visible_charts",
+    )
+    if not visible_charts:
+        st.info("Selecione ao menos um gráfico para montar a análise mensal.")
         return
-    vals["mes"] = pd.to_datetime(vals["data"]).dt.to_period("M").astype(str)
-    indicador = st.selectbox("Indicador", sorted(vals["indicador"].unique()), key="monthly_indicator")
-    sub = vals[vals["indicador"] == indicador]
-    monthly = sub.groupby(["mes", "cd"], as_index=False)["valor"].mean()
-    fig = px.bar(monthly, x="mes", y="valor", color="cd", barmode="group", title=indicador, color_discrete_sequence=[BR_ORANGE, BR_DARK, "#7A7A7A"])
-    st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(monthly, use_container_width=True, hide_index=True)
+
+    st.markdown("**Indicadores por gráfico visível**")
+    st.caption("Cada gráfico tem sua própria seleção. Ex.: Performance pode aparecer na evolução diária e ficar fora do acumulado.")
+    chart_indicator_map: dict[str, list[str]] = {}
+    missing_chart_indicators: list[str] = []
+    for chart_name in visible_charts:
+        chart_key = hashlib.md5(str(chart_name).encode("utf-8")).hexdigest()[:8]
+        selected_for_chart = st.multiselect(
+            f"Indicadores em {chart_name}",
+            all_labels,
+            default=[],
+            key=f"monthly_indicators_for_chart_{chart_key}",
+            help="Selecione somente os indicadores que devem aparecer neste gráfico específico.",
+        )
+        chart_indicator_map[chart_name] = list(selected_for_chart)
+        if not selected_for_chart:
+            missing_chart_indicators.append(chart_name)
+
+    if missing_chart_indicators:
+        st.warning("Selecione ao menos um indicador para cada gráfico visível: " + ", ".join(missing_chart_indicators) + ".")
+        return
+
+    selected_labels: list[str] = []
+    for label in all_labels:
+        if any(label in chart_indicator_map.get(chart_name, []) for chart_name in visible_charts):
+            selected_labels.append(label)
+
+    if not selected_labels:
+        st.info("Selecione ao menos um indicador para montar a análise.")
+        return
+
+    st.markdown("**Referência/meta dos gráficos**")
+    st.caption("Configure o confronto de cada indicador: sem referência, meta cadastrada ou outro campo.")
+    ref_config: dict[str, dict[str, Any]] = {}
+    ref_options_base = ["Sem referência", "Meta cadastrada"]
+    pending_ref_choices = st.session_state.pop("monthly_pending_ref_choices", {}) if isinstance(st.session_state.get("monthly_pending_ref_choices", {}), dict) else {}
+    for idx, label in enumerate(selected_labels):
+        field = label_map[label]
+        cols = st.columns([1.2, 1.8], gap="medium")
+        with cols[0]:
+            st.markdown(f"<div style='padding-top:.55rem;font-weight:700;color:{BR_DARK};'>{html.escape(_short_label(label))}</div>", unsafe_allow_html=True)
+        with cols[1]:
+            ref_options = ref_options_base + [f"Campo: {x}" for x in all_labels if x != label]
+            ref_key = f"monthly_ref_choice_{idx}_{hashlib.md5(label.encode('utf-8')).hexdigest()[:8]}"
+            pending_choice = str(pending_ref_choices.get(label, ""))
+            if pending_choice in ref_options:
+                st.session_state[ref_key] = pending_choice
+            choice = st.selectbox(
+                f"Referência de {_short_label(label)}",
+                ref_options,
+                index=0,
+                key=ref_key,
+                label_visibility="collapsed",
+            )
+        ref_config[label] = {"choice": choice, "field": field}
+
+    def _current_monthly_view_payload() -> dict[str, Any]:
+        return {
+            "version": "v6",
+            "visible_charts": list(visible_charts),
+            "chart_indicator_map": {k: list(v) for k, v in chart_indicator_map.items()},
+            "ref_choices": {label: str(cfg.get("choice") or "Sem referência") for label, cfg in ref_config.items()},
+            "consolidacao": str(consolidacao),
+            "chart_kind": str(chart_kind),
+            "chart_palette": str(chart_palette),
+            "cd_choice": str(cd_choice),
+            "updated_at": now_iso(),
+        }
+
+    with st.expander("Salvar / gerenciar visão mensal", expanded=False):
+        st.caption("Salve a composição dos gráficos: gráficos visíveis, indicadores por gráfico, referências, tipo de gráfico e paleta. O período analisado não é salvo.")
+        s1, s2, s3 = st.columns([1.25, 1.45, 1.05], gap="medium")
+        with s1:
+            save_view_name = st.text_input("Nome da visão", placeholder="Ex.: Mensal Executivo", key="monthly_save_view_name")
+        with s2:
+            save_view_desc = st.text_input("Descrição/motivo", placeholder="Ex.: padrão mensal para reunião de performance", key="monthly_save_view_desc")
+        with s3:
+            scope_options = ["Somente para mim"]
+            if can_manage_global_monthly_view:
+                scope_options.insert(0, "Todos os usuários")
+            save_scope = st.selectbox("Escopo", scope_options, key="monthly_save_view_scope")
+        save_as_default = st.checkbox("Definir como padrão deste escopo", value=False, key="monthly_save_view_default")
+        if save_scope == "Todos os usuários" and save_as_default:
+            st.caption("Esta visão será carregada automaticamente como padrão global para os usuários neste escopo de CD.")
+        elif save_scope == "Todos os usuários":
+            st.caption("Esta visão ficará disponível para todos, mas não substituirá o padrão global atual.")
+        else:
+            st.caption("Esta visão ficará disponível apenas para o usuário logado.")
+
+        if st.button("Salvar visão mensal", type="primary", use_container_width=True, key="monthly_save_view_btn"):
+            try:
+                owner = GLOBAL_DASHBOARD_USERNAME if save_scope == "Todos os usuários" else username
+                _save_monthly_chart_view(owner, cd_view_key, save_view_name, save_view_desc, _current_monthly_view_payload(), save_as_default, username)
+                st.success("Visão mensal salva.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+        manageable = pd.DataFrame()
+        if not saved_views_df.empty:
+            if can_manage_global_monthly_view:
+                manageable = saved_views_df.copy()
+            else:
+                manageable = saved_views_df[saved_views_df["username"].astype(str).eq(str(username))].copy()
+        if not manageable.empty:
+            st.divider()
+            remove_label_to_id = {}
+            for _, vr in manageable.iterrows():
+                label = _monthly_view_label(vr)
+                if label in remove_label_to_id:
+                    label = f"{label} · #{int(vr['id'])}"
+                remove_label_to_id[label] = int(vr["id"])
+            remove_choice = st.selectbox("Inativar visão existente", [""] + list(remove_label_to_id.keys()), key="monthly_remove_saved_view")
+            if st.button("Inativar visão selecionada", use_container_width=True, key="monthly_remove_saved_view_btn"):
+                if remove_choice:
+                    try:
+                        _inactivate_monthly_chart_view(remove_label_to_id[remove_choice], username)
+                        st.success("Visão inativada.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+                else:
+                    st.warning("Selecione uma visão para inativar.")
+
+    filled_dates = sorted(pd.to_datetime(vals_window["data"], errors="coerce").dt.date.dropna().unique().tolist())
+    if not filled_dates:
+        st.info("Sem datas preenchidas válidas no período.")
+        return
+
+    date_iso = [d.isoformat() for d in filled_dates]
+    target_maps_by_cd_date: dict[tuple[str, str], dict[tuple[str, str, str], dict]] = {}
+    calc_by_cd_date: dict[tuple[str, str], dict[tuple[str, str], float]] = {}
+    for cd in selected_cds:
+        cd_cfg = configs_all[configs_all["cd"].astype(str).eq(str(cd))].copy() if not configs_all.empty else pd.DataFrame()
+        cd_vals = vals_window[vals_window["cd"].astype(str).eq(str(cd))].copy()
+        maps = target_lookup_for_dates([str(cd)], date_iso)
+        for ds in date_iso:
+            target_maps_by_cd_date[(str(cd), ds)] = maps.get(ds, {})
+            calc_by_cd_date[(str(cd), ds)] = compute_calculated_values(cd_vals, cd_cfg, str(cd), ds) if not cd_cfg.empty else {}
+
+    analysis_rows: list[dict[str, Any]] = []
+    table_rows: list[dict[str, Any]] = []
+
+    for label in selected_labels:
+        field = label_map[label]
+        ref_choice = ref_config[label]["choice"]
+        ref_field: Optional[dict[str, Any]] = None
+        ref_kind = "Sem referência"
+        if str(ref_choice).startswith("Campo: "):
+            ref_label = str(ref_choice).replace("Campo: ", "", 1)
+            ref_field = label_map.get(ref_label)
+            ref_kind = "Outro indicador/campo"
+        elif ref_choice == "Meta cadastrada":
+            ref_kind = "Meta cadastrada"
+
+        for cd in selected_cds:
+            for day in filled_dates:
+                actual, formato, tipo_campo, indicador_nome = _value_for_field(
+                    vals_window,
+                    configs_all,
+                    str(cd),
+                    field,
+                    day,
+                    calc_by_cd_date,
+                    target_maps_by_cd_date,
+                )
+
+                ref_value = None
+                ref_formato = formato
+                ref_name = ""
+                if ref_kind == "Meta cadastrada":
+                    ref_value, ref_formato = _meta_value_for_field(configs_all, str(cd), field, day, target_maps_by_cd_date)
+                    ref_name = f"Meta · {_short_label(label)}"
+                elif ref_field is not None:
+                    ref_value, ref_formato, _, ref_ind_name = _value_for_field(
+                        vals_window,
+                        configs_all,
+                        str(cd),
+                        ref_field,
+                        day,
+                        calc_by_cd_date,
+                        target_maps_by_cd_date,
+                    )
+                    ref_name = f"Ref · {_short_label(ref_field['label'])}"
+
+                if actual is not None:
+                    analysis_rows.append({
+                        "data_dt": pd.to_datetime(day),
+                        "data_label": br_date_label(day.isoformat()),
+                        "cd": str(cd),
+                        "indicador_analisado": _short_label(label),
+                        "indicador_label_completo": str(label),
+                        "serie_nome": f"{_short_label(label)} · {cd}" if cd_choice == "Todos" else _short_label(label),
+                        "tipo_serie": "Indicador",
+                        "valor": float(actual),
+                        "formato": formato,
+                        "tipo_campo": tipo_campo,
+                        "referencia_tipo": ref_kind,
+                    })
+
+                if ref_value is not None and ref_kind != "Sem referência":
+                    analysis_rows.append({
+                        "data_dt": pd.to_datetime(day),
+                        "data_label": br_date_label(day.isoformat()),
+                        "cd": str(cd),
+                        "indicador_analisado": _short_label(label),
+                        "indicador_label_completo": str(label),
+                        "serie_nome": f"{ref_name} · {cd}" if cd_choice == "Todos" else ref_name,
+                        "tipo_serie": "Referência",
+                        "valor": float(ref_value),
+                        "formato": ref_formato,
+                        "tipo_campo": "referencia",
+                        "referencia_tipo": ref_kind,
+                    })
+
+                if actual is not None or ref_value is not None:
+                    diff = None
+                    pct = None
+                    if actual is not None and ref_value is not None:
+                        diff = float(actual) - float(ref_value)
+                        pct = (float(actual) / float(ref_value)) if abs(float(ref_value)) > 1e-12 else None
+                    table_rows.append({
+                        "Data": br_date_label(day.isoformat()),
+                        "Data ISO": day.isoformat(),
+                        "CD": str(cd),
+                        "Indicador": _short_label(label),
+                        "Indicador completo": str(label),
+                        "Valor analisado": actual,
+                        "Valor analisado formatado": format_value(actual, formato, indicador_nome),
+                        "Tipo de referência": ref_kind,
+                        "Referência": ref_name if ref_kind != "Sem referência" else "",
+                        "Valor referência": ref_value,
+                        "Valor referência formatado": format_value(ref_value, ref_formato, ref_name),
+                        "Diferença": diff,
+                        "% Atingimento": pct,
+                        "% Atingimento formatado": format_value(pct, "percentual", "% atingimento") if pct is not None else "",
+                    })
+
+    analysis = pd.DataFrame(analysis_rows)
+    table_df = pd.DataFrame(table_rows)
+
+    def _labels_for_chart(chart_name: str) -> set[str]:
+        return {str(x) for x in chart_indicator_map.get(chart_name, [])}
+
+    def _analysis_for_chart(chart_name: str) -> pd.DataFrame:
+        if analysis.empty:
+            return analysis
+        labels = _labels_for_chart(chart_name)
+        if not labels:
+            return analysis.iloc[0:0].copy()
+        if "indicador_label_completo" in analysis.columns:
+            return analysis[analysis["indicador_label_completo"].astype(str).isin(labels)].copy()
+        short_labels = {_short_label(x) for x in labels}
+        return analysis[analysis["indicador_analisado"].astype(str).isin(short_labels)].copy()
+
+    def _table_for_chart(chart_name: str) -> pd.DataFrame:
+        if table_df.empty:
+            return table_df
+        labels = _labels_for_chart(chart_name)
+        if not labels:
+            return table_df.iloc[0:0].copy()
+        if "Indicador completo" in table_df.columns:
+            return table_df[table_df["Indicador completo"].astype(str).isin(labels)].copy()
+        short_labels = {_short_label(x) for x in labels}
+        return table_df[table_df["Indicador"].astype(str).isin(short_labels)].copy()
+
+    if analysis.empty:
+        st.info("Os indicadores selecionados não possuem valores para as datas preenchidas do período.")
+        return
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Datas preenchidas", len(filled_dates))
+    k2.metric("CDs analisados", len(selected_cds))
+    k3.metric("Indicadores únicos", len(selected_labels))
+    k4.metric("Séries no gráfico", analysis["serie_nome"].nunique())
+
+    monthly_summary = _build_monthly_executive_summary(table_df, start_d, end_d, consolidacao)
+    if monthly_summary is not None and not monthly_summary.empty:
+        with st.expander("Resumo executivo do período", expanded=True):
+            summary_cols = [
+                "CD", "Indicador", "Consolidação", "Valor consolidado formatado",
+                "Referência formatada", "% Atingimento formatado", "Status", "Leitura gerencial",
+            ]
+            present_summary_cols = [c for c in summary_cols if c in monthly_summary.columns]
+            st.dataframe(monthly_summary[present_summary_cols], use_container_width=True, hide_index=True, height=min(360, 80 + len(monthly_summary) * 30))
+
+    if "Evolução diária" in visible_charts:
+        chart_analysis = _analysis_for_chart("Evolução diária")
+        daily = _aggregate_chart(chart_analysis, ["data_dt", "data_label", "cd", "serie_nome", "tipo_serie", "indicador_analisado", "formato"], consolidacao)
+        _plot_time("Evolução diária", daily, chart_kind, palette_name=chart_palette)
+
+    if "Realizado x Referência" in visible_charts:
+        chart_analysis = _analysis_for_chart("Realizado x Referência")
+        period_cmp = _aggregate_chart(chart_analysis, ["cd", "serie_nome", "tipo_serie", "indicador_analisado", "formato"], consolidacao)
+        if not period_cmp.empty:
+            period_cmp["eixo"] = period_cmp["serie_nome"]
+        _plot_bar("Realizado x Referência no período", period_cmp, "eixo", "valor", "tipo_serie", palette_name=chart_palette)
+
+    if "Acumulado do mês" in visible_charts:
+        chart_analysis = _analysis_for_chart("Acumulado do mês")
+        daily = _aggregate_chart(chart_analysis, ["data_dt", "data_label", "cd", "serie_nome", "tipo_serie", "indicador_analisado", "formato"], consolidacao)
+        if not daily.empty:
+            daily = daily.sort_values(["cd", "serie_nome", "data_dt"], kind="stable")
+            acc_rows: list[pd.DataFrame] = []
+            for _, g in daily.groupby(["cd", "serie_nome"], sort=False):
+                g = g.copy()
+                mode = _auto_mode_from_text(g["indicador_analisado"].iloc[0], g["formato"].iloc[0] if "formato" in g.columns else "", consolidacao)
+                if mode == "mean":
+                    g["valor_acumulado"] = g["valor"].expanding().mean().values
+                else:
+                    g["valor_acumulado"] = g["valor"].cumsum()
+                acc_rows.append(g)
+            acc = pd.concat(acc_rows, ignore_index=True) if acc_rows else pd.DataFrame()
+        else:
+            acc = pd.DataFrame()
+        _plot_time("Acumulado / média acumulada do mês", acc, "Linha", y_col="valor_acumulado", palette_name=chart_palette)
+
+    if "Comparativo mês a mês" in visible_charts:
+        analysis_month = _analysis_for_chart("Comparativo mês a mês").copy()
+        if not analysis_month.empty:
+            analysis_month["mes"] = analysis_month["data_dt"].dt.to_period("M").astype(str)
+        monthly = _aggregate_chart(analysis_month, ["mes", "cd", "serie_nome", "tipo_serie", "indicador_analisado", "formato"], consolidacao)
+        _plot_bar("Comparativo mês a mês", monthly, "mes", "valor", "serie_nome", palette_name=chart_palette)
+
+    if "Ranking do período" in visible_charts:
+        chart_analysis = _analysis_for_chart("Ranking do período")
+        ranking_base = chart_analysis[chart_analysis["tipo_serie"].eq("Indicador")].copy()
+        ranking = _aggregate_chart(ranking_base, ["cd", "serie_nome", "indicador_analisado", "formato"], consolidacao)
+        if not ranking.empty:
+            ranking["ranking"] = ranking["cd"] + " · " + ranking["indicador_analisado"] if cd_choice == "Todos" else ranking["indicador_analisado"]
+            ranking = ranking.sort_values("valor", ascending=False, kind="stable").head(20)
+        _plot_bar("Ranking do período", ranking, "ranking", "valor", "cd" if cd_choice == "Todos" else "serie_nome", palette_name=chart_palette)
+
+    if "Tabela analítica" in visible_charts:
+        st.markdown("### Tabela analítica")
+        table_chart_df = _table_for_chart("Tabela analítica")
+        if table_chart_df.empty:
+            st.info("Sem dados analíticos para exibir.")
+        else:
+            show_cols = [
+                "Data", "CD", "Indicador", "Valor analisado formatado",
+                "Tipo de referência", "Referência", "Valor referência formatado",
+                "Diferença", "% Atingimento formatado",
+            ]
+            present = [c for c in show_cols if c in table_chart_df.columns]
+            st.dataframe(table_chart_df[present], use_container_width=True, hide_index=True, height=min(620, 80 + len(table_chart_df) * 28))
+            if has_perm("export_reports"):
+                st.download_button(
+                    "Baixar tabela analítica em CSV",
+                    table_chart_df.to_csv(index=False).encode("utf-8-sig"),
+                    "visao_mensal_tabela_analitica.csv",
+                    "text/csv",
+                    use_container_width=True,
+                )
 
     if has_perm("configure_indicators"):
         st.divider()
-        render_visualization_admin("mensal", cd_for_view, load_indicator_config(cd_for_view, active_only=False), "monthly_admin")
-
+        with st.expander("Administração de visões mensais", expanded=False):
+            st.caption("A análise mensal agora lista todos os campos. Esta administração permanece apenas para manter cadastros de visões, sem restringir os indicadores da análise.")
+            admin_cd = selected_cds[0] if selected_cds else centers[0]
+            render_visualization_admin("mensal", admin_cd, load_indicator_config(admin_cd, active_only=False), "monthly_admin")
 
 def page_edit() -> None:
     render_header("Editar Indicador", "Correção manual de dado diário com motivo obrigatório.")
