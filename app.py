@@ -142,10 +142,337 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+
+# ----------------------------- persistência SQLite no GitHub -----------------------------
+# Esta camada resolve a limitação do Streamlit Community Cloud: arquivos locais
+# podem ser perdidos quando o app reinicia/redeploya. Mantemos o SQLite como base
+# operacional, mas sincronizamos o arquivo data/indicadores.db com o GitHub.
+#
+# Configure no Streamlit Secrets:
+# [github_storage]
+# enabled = true
+# owner = "SEU_USUARIO_OU_ORG"
+# repo = "SEU_REPOSITORIO"
+# branch = "main"
+# db_path = "data/indicadores.db"
+# token = "github_pat_..."
+
+_GITHUB_SYNC_MARKER_NAME = ".github_sqlite_sync.json"
+_GITHUB_STARTUP_MARKER_NAME = ".github_sqlite_startup_loaded"
+_GITHUB_SYNC_IN_PROGRESS = False
+
+
+def _github_storage_bool(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "sim", "on"}
+
+
+def _github_storage_config() -> dict[str, Any]:
+    """Lê configuração do GitHub Storage via Streamlit Secrets ou variáveis de ambiente."""
+    cfg: dict[str, Any] = {}
+    try:
+        if hasattr(st, "secrets") and "github_storage" in st.secrets:
+            cfg = dict(st.secrets["github_storage"])
+    except Exception:
+        cfg = {}
+
+    def pick(secret_key: str, env_key: str, default: str = "") -> str:
+        value = cfg.get(secret_key, None)
+        if value is None or str(value).strip() == "":
+            value = os.getenv(env_key, default)
+        return str(value).strip()
+
+    enabled_raw = cfg.get("enabled", os.getenv("GITHUB_STORAGE_ENABLED", "false"))
+    out = {
+        "enabled": _github_storage_bool(enabled_raw),
+        "owner": pick("owner", "GITHUB_STORAGE_OWNER"),
+        "repo": pick("repo", "GITHUB_STORAGE_REPO"),
+        "branch": pick("branch", "GITHUB_STORAGE_BRANCH", "main"),
+        "db_path": pick("db_path", "GITHUB_STORAGE_DB_PATH", "data/indicadores.db"),
+        "token": pick("token", "GITHUB_STORAGE_TOKEN"),
+    }
+    out["ready"] = bool(out["enabled"] and out["owner"] and out["repo"] and out["branch"] and out["db_path"] and out["token"])
+    return out
+
+
+def github_storage_enabled() -> bool:
+    cfg = _github_storage_config()
+    return bool(cfg.get("ready"))
+
+
+def _github_sync_marker_path() -> Path:
+    return Path(DB_PATH).parent / _GITHUB_SYNC_MARKER_NAME
+
+
+def _github_startup_marker_path() -> Path:
+    return Path(DB_PATH).parent / _GITHUB_STARTUP_MARKER_NAME
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib as _hashlib
+    h = _hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    import json as _json
+    try:
+        if path.exists():
+            return _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {}
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    import json as _json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _github_api_request(method: str, url: str, token: str, payload: Optional[dict[str, Any]] = None) -> tuple[int, dict[str, Any], str]:
+    import json as _json
+    import urllib.error as _urlerror
+    import urllib.request as _urlrequest
+
+    data = None
+    if payload is not None:
+        data = _json.dumps(payload).encode("utf-8")
+
+    req = _urlrequest.Request(
+        url,
+        data=data,
+        method=method.upper(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "painel-indicadores-streamlit",
+        },
+    )
+    try:
+        with _urlrequest.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+            parsed = _json.loads(raw) if raw else {}
+            return int(resp.status), parsed, raw
+    except _urlerror.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = _json.loads(raw) if raw else {}
+        except Exception:
+            parsed = {"message": raw}
+        return int(exc.code), parsed, raw
+
+
+def _github_content_url(cfg: dict[str, Any]) -> str:
+    import urllib.parse as _urlparse
+    path = str(cfg["db_path"]).strip().lstrip("/")
+    quoted_path = "/".join(_urlparse.quote(part) for part in path.split("/"))
+    branch = _urlparse.quote(str(cfg["branch"]))
+    return f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/{quoted_path}?ref={branch}"
+
+
+def _github_get_remote_file_metadata(cfg: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    status, payload, _ = _github_api_request("GET", _github_content_url(cfg), str(cfg["token"]))
+    if status == 200:
+        return str(payload.get("sha") or "") or None, str(payload.get("content") or "") or None
+    if status == 404:
+        return None, None
+    raise RuntimeError(f"GitHub GET falhou ({status}): {payload.get('message', payload)}")
+
+
+def sync_sqlite_from_github_on_startup(force: bool = False) -> None:
+    """Baixa o SQLite persistido no GitHub uma vez por container/sessão de app.
+
+    Não baixa em todo rerun para evitar sobrescrever alteração local caso uma sincronização
+    de upload falhe momentaneamente.
+    """
+    cfg = _github_storage_config()
+    if not cfg.get("ready"):
+        return
+
+    db_path = Path(DB_PATH)
+    marker = _github_startup_marker_path()
+    if marker.exists() and db_path.exists() and not force:
+        return
+
+    sha = None
+    try:
+        sha, content_b64 = _github_get_remote_file_metadata(cfg)
+        if not content_b64:
+            # Arquivo ainda não existe no GitHub; o init_db criará a base local e o
+            # primeiro commit posterior subirá o arquivo.
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(now_iso(), encoding="utf-8")
+            return
+
+        import base64 as _base64
+        clean_content = str(content_b64).replace("\n", "")
+        db_bytes = _base64.b64decode(clean_content)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Remove WAL/SHM antigos para não misturar o banco remoto com cache local.
+        for extra in [Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]:
+            try:
+                if extra.exists():
+                    extra.unlink()
+            except Exception:
+                pass
+
+        tmp = db_path.with_suffix(db_path.suffix + ".download")
+        tmp.write_bytes(db_bytes)
+        tmp.replace(db_path)
+
+        db_hash = _sha256_file(db_path)
+        _write_json_file(_github_sync_marker_path(), {
+            "remote_sha": sha,
+            "db_hash": db_hash,
+            "downloaded_at": now_iso(),
+            "uploaded_at": None,
+        })
+        marker.write_text(now_iso(), encoding="utf-8")
+        try:
+            st.session_state["github_storage_status"] = "Banco sincronizado do GitHub."
+        except Exception:
+            pass
+    except Exception as exc:
+        # Não bloqueia abertura do app. O SQLite local/repo continua funcionando,
+        # mas o status aparece na tela após login.
+        try:
+            st.session_state["github_storage_warning"] = f"Falha ao baixar banco do GitHub: {exc}"
+        except Exception:
+            pass
+
+
+def _checkpoint_sqlite_wal_for_upload() -> None:
+    """Garante que alterações em WAL foram incorporadas ao .db antes do upload."""
+    db_path = Path(DB_PATH)
+    if not db_path.exists():
+        return
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=20)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        conn.close()
+    except Exception:
+        # Se falhar, ainda tentamos upload do arquivo principal; o erro será exibido
+        # somente se o GitHub upload falhar.
+        pass
+
+
+def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Streamlit", force: bool = False) -> bool:
+    """Envia o data/indicadores.db local para o GitHub se houve alteração."""
+    global _GITHUB_SYNC_IN_PROGRESS
+    if _GITHUB_SYNC_IN_PROGRESS:
+        return False
+
+    cfg = _github_storage_config()
+    if not cfg.get("ready"):
+        return False
+
+    db_path = Path(DB_PATH)
+    if not db_path.exists():
+        return False
+
+    try:
+        _GITHUB_SYNC_IN_PROGRESS = True
+        _checkpoint_sqlite_wal_for_upload()
+        current_hash = _sha256_file(db_path)
+        marker_path = _github_sync_marker_path()
+        marker = _read_json_file(marker_path)
+        if not force and marker.get("db_hash") == current_hash:
+            return False
+
+        import base64 as _base64
+        existing_sha, _ = _github_get_remote_file_metadata(cfg)
+        content_b64 = _base64.b64encode(db_path.read_bytes()).decode("ascii")
+        message = f"Atualiza banco SQLite do Painel PCP - {reason} - {now_iso()}"
+        payload: dict[str, Any] = {
+            "message": message[:250],
+            "content": content_b64,
+            "branch": str(cfg["branch"]),
+        }
+        if existing_sha:
+            payload["sha"] = existing_sha
+
+        put_url = _github_content_url(cfg).split("?", 1)[0]
+        status, response, _ = _github_api_request("PUT", put_url, str(cfg["token"]), payload)
+        if status not in {200, 201}:
+            raise RuntimeError(f"GitHub PUT falhou ({status}): {response.get('message', response)}")
+
+        new_sha = None
+        try:
+            new_sha = response.get("content", {}).get("sha")
+        except Exception:
+            new_sha = None
+        _write_json_file(marker_path, {
+            "remote_sha": new_sha or existing_sha,
+            "db_hash": current_hash,
+            "downloaded_at": marker.get("downloaded_at"),
+            "uploaded_at": now_iso(),
+            "last_reason": reason,
+        })
+        try:
+            st.session_state["github_storage_status"] = "Banco salvo no GitHub."
+        except Exception:
+            pass
+        return True
+    except Exception as exc:
+        try:
+            st.session_state["github_storage_warning"] = f"Falha ao salvar banco no GitHub: {exc}"
+        except Exception:
+            pass
+        return False
+    finally:
+        _GITHUB_SYNC_IN_PROGRESS = False
+
+
+class GitHubPersistedSQLiteConnection(sqlite3.Connection):
+    """Conexão SQLite que envia o DB ao GitHub após commits com alteração.
+
+    Qualquer tela que use get_conn().commit() passa a persistir automaticamente,
+    sem precisar alterar cada botão do app.
+    """
+    def commit(self) -> None:  # type: ignore[override]
+        super().commit()
+        try:
+            sync_sqlite_to_github("commit automático")
+        except Exception:
+            pass
+
+
+def render_github_storage_sidebar_status() -> None:
+    """Mostra status e botão de sincronização manual na sidebar."""
+    cfg = _github_storage_config()
+    if not cfg.get("enabled"):
+        return
+    st.sidebar.divider()
+    st.sidebar.caption("Persistência GitHub/SQLite")
+    if not cfg.get("ready"):
+        st.sidebar.warning("GitHub Storage habilitado, mas secrets incompletos.")
+        return
+    warning = st.session_state.pop("github_storage_warning", None)
+    status = st.session_state.pop("github_storage_status", None)
+    if warning:
+        st.sidebar.warning(str(warning))
+    elif status:
+        st.sidebar.success(str(status))
+    else:
+        st.sidebar.caption("Ativa")
+    if st.sidebar.button("Salvar banco agora no GitHub", use_container_width=True):
+        ok = sync_sqlite_to_github("sincronização manual", force=True)
+        if ok:
+            st.sidebar.success("Banco enviado ao GitHub.")
+        else:
+            st.sidebar.info("Nenhuma alteração nova para enviar ou sincronização desabilitada.")
+
+
 def get_conn() -> sqlite3.Connection:
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, check_same_thread=False, factory=GitHubPersistedSQLiteConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
@@ -929,6 +1256,7 @@ def sidebar_nav() -> str:
         st.sidebar.caption("Administração habilitada: usuários, permissões, indicadores e metas.")
 
     render_global_indicator_admin_tools()
+    render_github_storage_sidebar_status()
 
     if st.sidebar.button("Sair", use_container_width=True):
         st.session_state.clear()
@@ -8287,6 +8615,7 @@ def page_audit() -> None:
 # ----------------------------- main -----------------------------
 
 def main() -> None:
+    sync_sqlite_from_github_on_startup()
     init_db()
     if not require_login():
         return
