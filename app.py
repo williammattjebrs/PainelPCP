@@ -362,8 +362,15 @@ def _checkpoint_sqlite_wal_for_upload() -> None:
         pass
 
 
+
 def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Streamlit", force: bool = False) -> bool:
-    """Envia o data/indicadores.db local para o GitHub se houve alteração."""
+    """Envia o data/indicadores.db local para o GitHub se houve alteração.
+
+    V2:
+    - Reconsulta o SHA remoto imediatamente antes do PUT.
+    - Se o GitHub retornar 409 por SHA desatualizado, reconsulta e tenta novamente.
+    - Corrige o erro: "is at <sha atual> but expected <sha antigo>".
+    """
     global _GITHUB_SYNC_IN_PROGRESS
     if _GITHUB_SYNC_IN_PROGRESS:
         return False
@@ -379,46 +386,78 @@ def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Stre
     try:
         _GITHUB_SYNC_IN_PROGRESS = True
         _checkpoint_sqlite_wal_for_upload()
+
         current_hash = _sha256_file(db_path)
         marker_path = _github_sync_marker_path()
         marker = _read_json_file(marker_path)
+
         if not force and marker.get("db_hash") == current_hash:
             return False
 
         import base64 as _base64
-        existing_sha, _ = _github_get_remote_file_metadata(cfg)
+        import time as _time
+
         content_b64 = _base64.b64encode(db_path.read_bytes()).decode("ascii")
-        message = f"Atualiza banco SQLite do Painel PCP - {reason} - {now_iso()}"
-        payload: dict[str, Any] = {
-            "message": message[:250],
-            "content": content_b64,
-            "branch": str(cfg["branch"]),
-        }
-        if existing_sha:
-            payload["sha"] = existing_sha
-
         put_url = _github_content_url(cfg).split("?", 1)[0]
-        status, response, _ = _github_api_request("PUT", put_url, str(cfg["token"]), payload)
-        if status not in {200, 201}:
-            raise RuntimeError(f"GitHub PUT falhou ({status}): {response.get('message', response)}")
 
-        new_sha = None
-        try:
-            new_sha = response.get("content", {}).get("sha")
-        except Exception:
-            new_sha = None
-        _write_json_file(marker_path, {
-            "remote_sha": new_sha or existing_sha,
-            "db_hash": current_hash,
-            "downloaded_at": marker.get("downloaded_at"),
-            "uploaded_at": now_iso(),
-            "last_reason": reason,
-        })
-        try:
-            st.session_state["github_storage_status"] = "Banco salvo no GitHub."
-        except Exception:
-            pass
-        return True
+        max_attempts = 4
+        last_status: Optional[int] = None
+        last_response: dict[str, Any] = {}
+        last_existing_sha: Optional[str] = None
+
+        for attempt in range(1, max_attempts + 1):
+            # Busca o SHA remoto mais recente imediatamente antes de atualizar.
+            existing_sha, _ = _github_get_remote_file_metadata(cfg)
+            last_existing_sha = existing_sha
+
+            payload: dict[str, Any] = {
+                "message": f"Atualiza banco SQLite do Painel PCP - {reason} - {now_iso()} - tentativa {attempt}"[:250],
+                "content": content_b64,
+                "branch": str(cfg["branch"]),
+            }
+            if existing_sha:
+                payload["sha"] = existing_sha
+
+            status, response, _ = _github_api_request("PUT", put_url, str(cfg["token"]), payload)
+            last_status = status
+            last_response = response if isinstance(response, dict) else {"message": str(response)}
+
+            if status in {200, 201}:
+                new_sha = None
+                try:
+                    new_sha = response.get("content", {}).get("sha")
+                except Exception:
+                    new_sha = None
+
+                _write_json_file(marker_path, {
+                    "remote_sha": new_sha or existing_sha,
+                    "db_hash": current_hash,
+                    "downloaded_at": marker.get("downloaded_at"),
+                    "uploaded_at": now_iso(),
+                    "last_reason": reason,
+                    "last_attempts": attempt,
+                })
+
+                try:
+                    st.session_state["github_storage_status"] = f"Banco salvo no GitHub. Tentativa: {attempt}."
+                except Exception:
+                    pass
+                return True
+
+            # 409 = conflito de versão/SHA. Reconsulta e tenta novamente.
+            if status == 409:
+                _time.sleep(min(2.5, 0.6 * attempt))
+                continue
+
+            raise RuntimeError(f"GitHub PUT falhou ({status}): {last_response.get('message', last_response)}")
+
+        raise RuntimeError(
+            "GitHub PUT falhou (409): conflito de versão do arquivo remoto. "
+            f"O app reconsultou o SHA remoto {max_attempts} vezes, mas o GitHub continuou recusando. "
+            f"Último SHA remoto consultado: {last_existing_sha}. "
+            f"Resposta: {last_response.get('message', last_response)}"
+        )
+
     except Exception as exc:
         try:
             st.session_state["github_storage_warning"] = f"Falha ao salvar banco no GitHub: {exc}"
