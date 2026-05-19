@@ -284,11 +284,99 @@ def _github_get_remote_file_metadata(cfg: dict[str, Any]) -> tuple[Optional[str]
     raise RuntimeError(f"GitHub GET falhou ({status}): {payload.get('message', payload)}")
 
 
-def sync_sqlite_from_github_on_startup(force: bool = False) -> None:
-    """Baixa o SQLite persistido no GitHub uma vez por container/sessão de app.
 
-    Não baixa em todo rerun para evitar sobrescrever alteração local caso uma sincronização
-    de upload falhe momentaneamente.
+def _sqlite_health(path: Path) -> dict[str, Any]:
+    """Mede a saúde mínima do SQLite antes de baixar/enviar ao GitHub."""
+    out: dict[str, Any] = {
+        "exists": path.exists(),
+        "ok": False,
+        "tables": {},
+        "values_count": 0,
+        "indicator_count": 0,
+        "users_count": 0,
+        "centers_count": 0,
+        "file_size": path.stat().st_size if path.exists() else 0,
+        "data_min": None,
+        "data_max": None,
+        "error": "",
+    }
+    if not path.exists() or out["file_size"] <= 0:
+        out["error"] = "arquivo inexistente ou vazio"
+        return out
+    try:
+        conn = sqlite3.connect(str(path), timeout=20)
+        conn.row_factory = sqlite3.Row
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        required = ["users", "centers", "indicator_config", "values_indicators"]
+        for t in required:
+            if t in tables:
+                try:
+                    out["tables"][t] = int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+                except Exception:
+                    out["tables"][t] = -1
+            else:
+                out["tables"][t] = None
+
+        out["values_count"] = int(out["tables"].get("values_indicators") or 0)
+        out["indicator_count"] = int(out["tables"].get("indicator_config") or 0)
+        out["users_count"] = int(out["tables"].get("users") or 0)
+        out["centers_count"] = int(out["tables"].get("centers") or 0)
+
+        if "values_indicators" in tables:
+            try:
+                row = conn.execute("SELECT MIN(data), MAX(data) FROM values_indicators").fetchone()
+                out["data_min"] = row[0]
+                out["data_max"] = row[1]
+            except Exception:
+                pass
+        conn.close()
+
+        out["ok"] = (
+            all(out["tables"].get(t) is not None for t in required)
+            and out["users_count"] >= 1
+            and out["centers_count"] >= 1
+            and out["indicator_count"] >= 1
+        )
+        return out
+    except Exception as exc:
+        out["error"] = str(exc)
+        return out
+
+
+def _sqlite_has_operational_data(path: Path) -> bool:
+    """Proteção anti-sobrescrita: banco sem fatos não deve substituir banco operacional."""
+    h = _sqlite_health(path)
+    return bool(h.get("ok")) and int(h.get("values_count") or 0) > 0
+
+
+def _github_local_backup_path(prefix: str) -> Path:
+    backup_dir = Path(DB_PATH).parent / "backups_github_sqlite"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return backup_dir / f"{prefix}_{ts}_indicadores.db"
+
+
+def _copy_local_db_backup(prefix: str) -> Optional[Path]:
+    db_path = Path(DB_PATH)
+    if not db_path.exists():
+        return None
+    try:
+        _checkpoint_sqlite_wal_for_upload()
+    except Exception:
+        pass
+    backup = _github_local_backup_path(prefix)
+    backup.write_bytes(db_path.read_bytes())
+    return backup
+
+
+def sync_sqlite_from_github_on_startup(force: bool = False) -> None:
+    """Baixa o SQLite persistido no GitHub com proteção anti-banco-vazio.
+
+    V3:
+    - Valida o banco remoto antes de substituir o local.
+    - Se o remoto estiver zerado e o local tiver dados, não substitui.
+    - Se o local tiver dados, cria backup local antes de qualquer substituição.
+    - Se o remoto estiver zerado, evita que init_db/commit suba um banco vazio por cima.
     """
     cfg = _github_storage_config()
     if not cfg.get("ready"):
@@ -303,10 +391,15 @@ def sync_sqlite_from_github_on_startup(force: bool = False) -> None:
     try:
         sha, content_b64 = _github_get_remote_file_metadata(cfg)
         if not content_b64:
-            # Arquivo ainda não existe no GitHub; o init_db criará a base local e o
-            # primeiro commit posterior subirá o arquivo.
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(now_iso(), encoding="utf-8")
+            try:
+                st.session_state["github_storage_warning"] = (
+                    "Banco remoto não encontrado no GitHub. "
+                    "O app não enviará banco zerado automaticamente."
+                )
+            except Exception:
+                pass
             return
 
         import base64 as _base64
@@ -314,7 +407,43 @@ def sync_sqlite_from_github_on_startup(force: bool = False) -> None:
         db_bytes = _base64.b64decode(clean_content)
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Remove WAL/SHM antigos para não misturar o banco remoto com cache local.
+        tmp = db_path.with_suffix(db_path.suffix + ".download")
+        tmp.write_bytes(db_bytes)
+        remote_health = _sqlite_health(tmp)
+        local_health = _sqlite_health(db_path)
+
+        # Regra de segurança principal:
+        # nunca deixar um remoto sem values_indicators substituir um local com dados.
+        if not _sqlite_has_operational_data(tmp) and _sqlite_has_operational_data(db_path):
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            marker.write_text(now_iso(), encoding="utf-8")
+            st.session_state["github_storage_warning"] = (
+                "Proteção ativada: o banco no GitHub parece estar vazio/zerado "
+                f"(values={remote_health.get('values_count')}). "
+                "O banco local com dados foi preservado. "
+                "Restaure no GitHub uma versão anterior de data/indicadores.db ou use o backup local."
+            )
+            return
+
+        # Se o remoto está estruturalmente inválido, não substitui nada.
+        if not remote_health.get("ok"):
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+            marker.write_text(now_iso(), encoding="utf-8")
+            st.session_state["github_storage_warning"] = (
+                f"Banco remoto inválido no GitHub. Substituição bloqueada. Detalhe: {remote_health.get('error') or remote_health}"
+            )
+            return
+
+        # Backup do local antes de substituir por remoto válido.
+        if db_path.exists():
+            _copy_local_db_backup("antes_download")
+
         for extra in [Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]:
             try:
                 if extra.exists():
@@ -322,8 +451,6 @@ def sync_sqlite_from_github_on_startup(force: bool = False) -> None:
             except Exception:
                 pass
 
-        tmp = db_path.with_suffix(db_path.suffix + ".download")
-        tmp.write_bytes(db_bytes)
         tmp.replace(db_path)
 
         db_hash = _sha256_file(db_path)
@@ -332,15 +459,17 @@ def sync_sqlite_from_github_on_startup(force: bool = False) -> None:
             "db_hash": db_hash,
             "downloaded_at": now_iso(),
             "uploaded_at": None,
+            "remote_health": remote_health,
+            "local_health_before_download": local_health,
         })
         marker.write_text(now_iso(), encoding="utf-8")
         try:
-            st.session_state["github_storage_status"] = "Banco sincronizado do GitHub."
+            st.session_state["github_storage_status"] = (
+                f"Banco sincronizado do GitHub. Registros: {remote_health.get('values_count')}."
+            )
         except Exception:
             pass
     except Exception as exc:
-        # Não bloqueia abertura do app. O SQLite local/repo continua funcionando,
-        # mas o status aparece na tela após login.
         try:
             st.session_state["github_storage_warning"] = f"Falha ao baixar banco do GitHub: {exc}"
         except Exception:
@@ -357,19 +486,17 @@ def _checkpoint_sqlite_wal_for_upload() -> None:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         conn.close()
     except Exception:
-        # Se falhar, ainda tentamos upload do arquivo principal; o erro será exibido
-        # somente se o GitHub upload falhar.
         pass
 
 
-
 def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Streamlit", force: bool = False) -> bool:
-    """Envia o data/indicadores.db local para o GitHub se houve alteração.
+    """Envia o SQLite local para o GitHub com proteção contra banco vazio.
 
-    V2:
-    - Reconsulta o SHA remoto imediatamente antes do PUT.
-    - Se o GitHub retornar 409 por SHA desatualizado, reconsulta e tenta novamente.
-    - Corrige o erro: "is at <sha atual> but expected <sha antigo>".
+    V3:
+    - Bloqueia upload se o banco local não tiver estrutura mínima.
+    - Bloqueia upload se values_indicators = 0, exceto quando GITHUB_STORAGE_ALLOW_EMPTY_UPLOAD=true.
+    - Antes do PUT, cria backup local do .db.
+    - Reconsulta SHA remoto e faz retry em 409.
     """
     global _GITHUB_SYNC_IN_PROGRESS
     if _GITHUB_SYNC_IN_PROGRESS:
@@ -387,12 +514,27 @@ def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Stre
         _GITHUB_SYNC_IN_PROGRESS = True
         _checkpoint_sqlite_wal_for_upload()
 
+        local_health = _sqlite_health(db_path)
+        allow_empty = _github_storage_bool(os.getenv("GITHUB_STORAGE_ALLOW_EMPTY_UPLOAD", "false"))
+
+        if not local_health.get("ok"):
+            raise RuntimeError(f"Upload bloqueado: banco SQLite local inválido. Saúde: {local_health}")
+
+        if int(local_health.get("values_count") or 0) == 0 and not allow_empty:
+            raise RuntimeError(
+                "Upload bloqueado: banco SQLite local está sem registros em values_indicators. "
+                "Isso evita sobrescrever o GitHub com base zerada. "
+                "Se isto for intencional, configure GITHUB_STORAGE_ALLOW_EMPTY_UPLOAD=true temporariamente."
+            )
+
         current_hash = _sha256_file(db_path)
         marker_path = _github_sync_marker_path()
         marker = _read_json_file(marker_path)
 
         if not force and marker.get("db_hash") == current_hash:
             return False
+
+        backup_path = _copy_local_db_backup("antes_upload")
 
         import base64 as _base64
         import time as _time
@@ -401,12 +543,10 @@ def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Stre
         put_url = _github_content_url(cfg).split("?", 1)[0]
 
         max_attempts = 4
-        last_status: Optional[int] = None
         last_response: dict[str, Any] = {}
         last_existing_sha: Optional[str] = None
 
         for attempt in range(1, max_attempts + 1):
-            # Busca o SHA remoto mais recente imediatamente antes de atualizar.
             existing_sha, _ = _github_get_remote_file_metadata(cfg)
             last_existing_sha = existing_sha
 
@@ -419,7 +559,6 @@ def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Stre
                 payload["sha"] = existing_sha
 
             status, response, _ = _github_api_request("PUT", put_url, str(cfg["token"]), payload)
-            last_status = status
             last_response = response if isinstance(response, dict) else {"message": str(response)}
 
             if status in {200, 201}:
@@ -436,15 +575,18 @@ def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Stre
                     "uploaded_at": now_iso(),
                     "last_reason": reason,
                     "last_attempts": attempt,
+                    "local_health": local_health,
+                    "backup_before_upload": str(backup_path) if backup_path else None,
                 })
 
                 try:
-                    st.session_state["github_storage_status"] = f"Banco salvo no GitHub. Tentativa: {attempt}."
+                    st.session_state["github_storage_status"] = (
+                        f"Banco salvo no GitHub. Registros: {local_health.get('values_count')}. Tentativa: {attempt}."
+                    )
                 except Exception:
                     pass
                 return True
 
-            # 409 = conflito de versão/SHA. Reconsulta e tenta novamente.
             if status == 409:
                 _time.sleep(min(2.5, 0.6 * attempt))
                 continue
@@ -453,7 +595,7 @@ def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Stre
 
         raise RuntimeError(
             "GitHub PUT falhou (409): conflito de versão do arquivo remoto. "
-            f"O app reconsultou o SHA remoto {max_attempts} vezes, mas o GitHub continuou recusando. "
+            f"O app reconsultou o SHA remoto {max_attempts} vezes. "
             f"Último SHA remoto consultado: {last_existing_sha}. "
             f"Resposta: {last_response.get('message', last_response)}"
         )
