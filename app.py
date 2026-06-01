@@ -729,13 +729,53 @@ def render_github_storage_sidebar_status() -> None:
             st.sidebar.info("Nenhuma alteração nova para enviar ou sincronização desabilitada.")
 
 
+
 def get_conn() -> sqlite3.Connection:
+    """Abre conexão SQLite de forma robusta para Streamlit Cloud.
+
+    Correção:
+    - Não força mais WAL como requisito obrigatório.
+    - WAL pode falhar em ambiente publicado, arquivo restaurado, lock ou filesystem do container.
+    - Se WAL falhar, usa journal_mode=DELETE sem derrubar o app.
+    - A persistência no GitHub continua garantida pelo snapshot sqlite3.backup() no sync_sqlite_to_github().
+    """
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False, factory=GitHubPersistedSQLiteConnection)
+
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=30,
+        check_same_thread=False,
+        factory=GitHubPersistedSQLiteConnection,
+    )
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+
+    # Evita erro "database is locked" em operações curtas.
+    try:
+        conn.execute("PRAGMA busy_timeout=30000;")
+    except Exception:
+        pass
+
+    # Foreign keys deve permanecer ativo, mas não pode derrubar o app em caso de falha pontual.
+    try:
+        conn.execute("PRAGMA foreign_keys=ON;")
+    except Exception:
+        pass
+
+    # WAL não é obrigatório para este app. Se falhar no Streamlit Cloud, seguimos com DELETE.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+    except sqlite3.DatabaseError:
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE;")
+        except Exception:
+            pass
+    except Exception:
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE;")
+        except Exception:
+            pass
+
     return conn
 
 
