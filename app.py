@@ -6177,9 +6177,77 @@ def page_dashboard() -> None:
         with f2:
             view_choice = st.selectbox("Visão do dashboard", options, key=view_key)
 
-    today = date.today()
-    yesterday = previous_working_day(cd, today)
-    month_start = today.replace(day=1)
+    # BUILD: Dashboard Executivo V2 Data Referência
+    # Regra: o dashboard deve permitir voltar para uma data operacional passada.
+    # A data escolhida alimenta:
+    # - Resultado do dia: somente a data de referência;
+    # - Acumulado do mês: do 1º dia do mês da referência até a data de referência;
+    # - Norteadores do mês: mês da referência, não necessariamente o mês atual.
+    today_real = date.today()
+
+    vals_dates_ref = load_values([cd])
+    available_dates: list[date] = []
+    if vals_dates_ref is not None and not vals_dates_ref.empty and "data" in vals_dates_ref.columns:
+        available_dates = sorted(pd.to_datetime(vals_dates_ref["data"], errors="coerce").dt.date.dropna().unique().tolist())
+
+    last_operational_day = previous_working_day(cd, today_real)
+    if available_dates:
+        available_until_today = [d for d in available_dates if d <= today_real]
+        if available_until_today:
+            default_ref_day = max(available_until_today)
+        else:
+            default_ref_day = max(available_dates)
+        min_ref_day = min(available_dates)
+        max_ref_day = max(max(available_dates), last_operational_day)
+    else:
+        default_ref_day = last_operational_day
+        min_ref_day = date(today_real.year, today_real.month, 1)
+        max_ref_day = today_real
+
+    with st.container(border=True):
+        st.caption("Referência temporal do dashboard")
+        d1, d2, d3 = st.columns([1.2, 1.05, 2.0], gap="large")
+        with d1:
+            ref_mode = st.radio(
+                "Modo",
+                ["Automático", "Manual"],
+                horizontal=True,
+                key=f"dashboard_ref_mode_{cd}",
+                help="Automático usa a última data com dado carregado até hoje. Manual permite voltar para uma data passada.",
+            )
+        with d2:
+            manual_ref_day = st.date_input(
+                "Data de referência",
+                value=default_ref_day,
+                min_value=min_ref_day,
+                max_value=max_ref_day,
+                key=f"dashboard_reference_day_{cd}",
+            )
+        with d3:
+            effective_ref_preview = default_ref_day if ref_mode == "Automático" else manual_ref_day
+            st.markdown(
+                f"""
+                <div style="padding:.62rem .85rem;border:1px solid {BR_BORDER};border-radius:13px;background:#fffaf6;">
+                    <div style="font-size:.76rem;color:#6b7280;text-transform:uppercase;font-weight:800;letter-spacing:.04em;">Período executivo</div>
+                    <div style="font-size:.94rem;color:{BR_DARK};font-weight:750;margin-top:.15rem;">
+                        Resultado do dia: {br_date_label(effective_ref_preview.isoformat())}
+                    </div>
+                    <div style="font-size:.84rem;color:#6b7280;margin-top:.15rem;">
+                        Acumulado: 01/{effective_ref_preview.month:02d}/{effective_ref_preview.year}
+                        até {effective_ref_preview.strftime("%d/%m/%Y")}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    reference_day = default_ref_day if ref_mode == "Automático" else manual_ref_day
+    if reference_day > today_real:
+        st.warning("A data de referência está no futuro em relação ao dia atual. Os cards podem ficar vazios se ainda não houver preenchimento.")
+
+    today = reference_day
+    yesterday = reference_day
+    month_start = reference_day.replace(day=1)
 
     selected_kind, selected_obj_id = option_meta.get(str(view_choice), ("indicator", None))
     selected_saved_id: int | None = int(selected_obj_id) if selected_kind == "saved" and selected_obj_id is not None else None
@@ -6252,7 +6320,7 @@ def page_dashboard() -> None:
         st.warning("Nenhum card selecionado para exibição nesta visão.")
     else:
         render_dashboard_card_grid(
-            f"Resultado de ontem · {br_date_label(yesterday.isoformat())}",
+            f"Resultado do dia · {br_date_label(yesterday.isoformat())}",
             selected,
             vals,
             cfg_all,
@@ -6440,8 +6508,8 @@ def page_dashboard() -> None:
                     )
                     obj_month = st.date_input(
                         "Mês de referência",
-                        value=date.today().replace(day=1),
-                        key="dashboard_objective_month_ref",
+                        value=month_start,
+                        key=f"dashboard_objective_month_ref_{cd}_{month_start.isoformat()}",
                     )
                     obj_month_ref = month_ref_iso(obj_month)
                     obj_cards_base = selected_preview.copy() if selected_preview is not None and not selected_preview.empty else pd.DataFrame()
