@@ -7,6 +7,7 @@ import io
 import os
 import re
 import sqlite3
+import threading
 import uuid
 import unicodedata
 from datetime import date, datetime, timedelta
@@ -689,18 +690,87 @@ def sync_sqlite_to_github(reason: str = "Atualização do banco SQLite pelo Stre
             pass
 
 
-class GitHubPersistedSQLiteConnection(sqlite3.Connection):
-    """Conexão SQLite que envia o DB ao GitHub após commits com alteração.
+@st.cache_resource
+def _db_runtime_state() -> dict[str, Any]:
+    """Estado compartilhado entre reruns/sessões do mesmo processo Streamlit."""
+    return {
+        "startup_lock": threading.RLock(),
+        "github_sync_lock": threading.RLock(),
+        "startup_done": False,
+        "initializing": False,
+    }
 
-    Qualquer tela que use get_conn().commit() passa a persistir automaticamente,
-    sem precisar alterar cada botão do app.
-    """
+
+def _configure_sqlite_file() -> None:
+    """Configura o journal uma única vez no bootstrap, nunca em cada conexão."""
+    db_path = Path(DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(db_path), timeout=60, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA busy_timeout=60000;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+
+        # WAL melhora a convivência entre leitura e escrita. Se o filesystem não
+        # aceitar WAL, cai para DELETE sem derrubar o app.
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;").fetchone()
+        except sqlite3.DatabaseError:
+            conn.execute("PRAGMA journal_mode=DELETE;").fetchone()
+
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL;")
+        except sqlite3.DatabaseError:
+            pass
+
+        try:
+            conn.execute("PRAGMA wal_autocheckpoint=1000;")
+        except sqlite3.DatabaseError:
+            pass
+    finally:
+        conn.close()
+
+
+def _sqlite_quick_check(path: Optional[Path] = None) -> tuple[bool, str]:
+    """Valida corrupção física/lógica básica do SQLite."""
+    db_path = path or Path(DB_PATH)
+    if not db_path.exists():
+        return True, "arquivo ainda não criado"
+
+    conn = sqlite3.connect(str(db_path), timeout=60, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA busy_timeout=60000;")
+        rows = conn.execute("PRAGMA quick_check;").fetchall()
+        messages = [str(r[0]) for r in rows if r]
+        ok = len(messages) == 1 and messages[0].strip().lower() == "ok"
+        return ok, " | ".join(messages) if messages else "quick_check sem retorno"
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        conn.close()
+
+
+class GitHubPersistedSQLiteConnection(sqlite3.Connection):
+    """Conexão normal do app com persistência GitHub serializada após commit."""
+
     def commit(self) -> None:  # type: ignore[override]
         super().commit()
+
+        state = _db_runtime_state()
+        if state.get("initializing"):
+            return
+
+        # Evita dois uploads concorrentes quando duas sessões salvam quase juntas.
         try:
-            sync_sqlite_to_github("commit automático")
-        except Exception:
-            pass
+            with state["github_sync_lock"]:
+                sync_sqlite_to_github("commit automático")
+        except Exception as exc:
+            try:
+                st.session_state["github_storage_warning"] = (
+                    f"O dado foi salvo localmente, mas a sincronização GitHub falhou: {exc}"
+                )
+            except Exception:
+                pass
 
 
 def render_github_storage_sidebar_status() -> None:
@@ -722,62 +792,44 @@ def render_github_storage_sidebar_status() -> None:
     else:
         st.sidebar.caption("Ativa")
     if st.sidebar.button("Salvar banco agora no GitHub", use_container_width=True):
-        ok = sync_sqlite_to_github("sincronização manual", force=True)
+        state = _db_runtime_state()
+        with state["github_sync_lock"]:
+            ok = sync_sqlite_to_github("sincronização manual", force=True)
         if ok:
             st.sidebar.success("Banco enviado ao GitHub.")
         else:
             st.sidebar.info("Nenhuma alteração nova para enviar ou sincronização desabilitada.")
 
 
-
 def get_conn() -> sqlite3.Connection:
-    """Abre conexão SQLite de forma robusta para Streamlit Cloud.
+    """Abre uma conexão curta e robusta para uso normal do app.
 
-    Correção:
-    - Não força mais WAL como requisito obrigatório.
-    - WAL pode falhar em ambiente publicado, arquivo restaurado, lock ou filesystem do container.
-    - Se WAL falhar, usa journal_mode=DELETE sem derrubar o app.
-    - A persistência no GitHub continua garantida pelo snapshot sqlite3.backup() no sync_sqlite_to_github().
+    Regras:
+    - NÃO muda journal_mode aqui. Isso é feito uma única vez no bootstrap.
+    - Aguarda até 60 s por um writer concorrente.
+    - BEGIN IMMEDIATE torna a aquisição do lock de escrita previsível.
+    - Cada chamada retorna uma conexão independente.
     """
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(
         str(db_path),
-        timeout=30,
+        timeout=60,
         check_same_thread=False,
+        isolation_level="IMMEDIATE",
         factory=GitHubPersistedSQLiteConnection,
     )
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000;")
+    conn.execute("PRAGMA foreign_keys=ON;")
 
-    # Evita erro "database is locked" em operações curtas.
     try:
-        conn.execute("PRAGMA busy_timeout=30000;")
-    except Exception:
-        pass
-
-    # Foreign keys deve permanecer ativo, mas não pode derrubar o app em caso de falha pontual.
-    try:
-        conn.execute("PRAGMA foreign_keys=ON;")
-    except Exception:
-        pass
-
-    # WAL não é obrigatório para este app. Se falhar no Streamlit Cloud, seguimos com DELETE.
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
     except sqlite3.DatabaseError:
-        try:
-            conn.execute("PRAGMA journal_mode=DELETE;")
-        except Exception:
-            pass
-    except Exception:
-        try:
-            conn.execute("PRAGMA journal_mode=DELETE;")
-        except Exception:
-            pass
+        pass
 
     return conn
-
 
 def hash_password(password: str) -> str:
     salt = os.getenv("PCP_PASSWORD_SALT", "trocar-este-salt-no-deploy")
@@ -903,321 +955,445 @@ def normalize_text(s: str) -> str:
 # ----------------------------- schema e seed -----------------------------
 
 def init_db() -> None:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            full_name TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'operador',
-            active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS user_permissions (
-            username TEXT NOT NULL,
-            permission TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 0,
-            updated_by TEXT,
-            updated_at TEXT,
-            UNIQUE(username, permission)
-        );
-        CREATE TABLE IF NOT EXISTS user_centers (
-            username TEXT NOT NULL,
-            cd TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            UNIQUE(username, cd)
-        );
-        CREATE TABLE IF NOT EXISTS centers (
-            code TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1,
-            is_default INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            created_by TEXT
-        );
-        CREATE TABLE IF NOT EXISTS values_indicators (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data TEXT NOT NULL,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            valor REAL,
-            source TEXT NOT NULL,
-            batch_id TEXT,
-            created_by TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_by TEXT,
-            updated_at TEXT,
-            UNIQUE(data, cd, grupo, indicador)
-        );
-        CREATE TABLE IF NOT EXISTS work_calendar (
-            cd TEXT NOT NULL,
-            data TEXT NOT NULL,
-            trabalhado INTEGER NOT NULL DEFAULT 1,
-            observacao TEXT,
-            updated_by TEXT,
-            updated_at TEXT,
-            UNIQUE(cd, data)
-        );
-        CREATE TABLE IF NOT EXISTS audit_changes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data TEXT NOT NULL,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            valor_anterior REAL,
-            valor_novo REAL,
-            motivo TEXT NOT NULL,
-            changed_by TEXT NOT NULL,
-            changed_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS imports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            batch_id TEXT NOT NULL UNIQUE,
-            filename TEXT NOT NULL,
-            cd TEXT NOT NULL,
-            rows_received INTEGER NOT NULL,
-            rows_inserted INTEGER NOT NULL,
-            rows_updated INTEGER NOT NULL,
-            imported_by TEXT NOT NULL,
-            imported_at TEXT NOT NULL,
-            motivo TEXT
-        );
-        CREATE TABLE IF NOT EXISTS indicator_config (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            codigo_indicador TEXT,
-            grupo_ordem INTEGER DEFAULT 999,
-            indicador_ordem INTEGER DEFAULT 999,
-            nivel INTEGER DEFAULT 0,
-            tipo_campo TEXT NOT NULL DEFAULT 'dado_diario',
-            formato TEXT NOT NULL DEFAULT 'numero',
-            direcao_meta TEXT NOT NULL DEFAULT 'maior_melhor',
-            exibir_painel_matricial INTEGER NOT NULL DEFAULT 1,
-            exibir_dashboard INTEGER NOT NULL DEFAULT 0,
-            exibir_dashboard_dia INTEGER NOT NULL DEFAULT 1,
-            exibir_dashboard_mes INTEGER NOT NULL DEFAULT 1,
-            exibir_referencia_card INTEGER NOT NULL DEFAULT 1,
-            card_ref_grupo TEXT,
-            card_ref_indicador TEXT,
-            exibir_meta_como_linha INTEGER NOT NULL DEFAULT 0,
-            exibir_total_mes INTEGER NOT NULL DEFAULT 0,
-            exibir_atingimento_mes INTEGER NOT NULL DEFAULT 0,
-            exibir_objetivo_mes_dashboard INTEGER NOT NULL DEFAULT 0,
-            total_mes_ref_grupo TEXT,
-            total_mes_ref_indicador TEXT,
-            usar_sinaleira INTEGER NOT NULL DEFAULT 0,
-            tolerancia_amarela REAL NOT NULL DEFAULT 0.05,
-            formula TEXT,
-            meta_ref_grupo TEXT,
-            meta_ref_indicador TEXT,
-            ativo INTEGER NOT NULL DEFAULT 1,
-            updated_by TEXT,
-            updated_at TEXT,
-            UNIQUE(cd, grupo, indicador)
-        );
-        CREATE TABLE IF NOT EXISTS target_versions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            valor_meta REAL NOT NULL,
-            direcao_meta TEXT NOT NULL DEFAULT 'maior_melhor',
-            data_inicio TEXT NOT NULL,
-            data_fim TEXT,
-            ativo INTEGER NOT NULL DEFAULT 1,
-            exibir_dashboard INTEGER NOT NULL DEFAULT 0,
-            exibir_painel_matricial INTEGER NOT NULL DEFAULT 1,
-            exibir_meta_como_linha INTEGER NOT NULL DEFAULT 0,
-            usar_sinaleira INTEGER NOT NULL DEFAULT 1,
-            tolerancia_amarela REAL NOT NULL DEFAULT 0.05,
-            motivo TEXT NOT NULL,
-            created_by TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS monthly_objectives (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            codigo_indicador TEXT,
-            mes_ref TEXT NOT NULL,
-            valor_objetivo REAL NOT NULL,
-            direcao_meta TEXT NOT NULL DEFAULT 'maior_melhor',
-            tolerancia_amarela REAL NOT NULL DEFAULT 0.05,
-            active INTEGER NOT NULL DEFAULT 1,
-            motivo TEXT NOT NULL,
-            created_by TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_by TEXT,
-            updated_at TEXT,
-            UNIQUE(cd, grupo, indicador, mes_ref)
-        );
-        CREATE TABLE IF NOT EXISTS config_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entidade TEXT NOT NULL,
-            cd TEXT,
-            grupo TEXT,
-            indicador TEXT,
-            campo TEXT,
-            valor_anterior TEXT,
-            valor_novo TEXT,
-            motivo TEXT NOT NULL,
-            changed_by TEXT NOT NULL,
-            changed_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS user_card_config (
-            username TEXT NOT NULL,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            updated_at TEXT,
-            UNIQUE(username, cd, grupo, indicador)
-        );
-        CREATE TABLE IF NOT EXISTS dashboard_card_views (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            cd TEXT NOT NULL,
-            nome TEXT NOT NULL,
-            descricao TEXT,
-            active INTEGER NOT NULL DEFAULT 1,
-            is_default INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT,
-            UNIQUE(username, cd, nome)
-        );
-        CREATE TABLE IF NOT EXISTS dashboard_card_view_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            view_id INTEGER NOT NULL,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            codigo_indicador TEXT,
-            sort_order INTEGER NOT NULL DEFAULT 999,
-            FOREIGN KEY(view_id) REFERENCES dashboard_card_views(id) ON DELETE CASCADE,
-            UNIQUE(view_id, cd, grupo, indicador)
-        );
-        
-        CREATE TABLE IF NOT EXISTS visualization_views (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            contexto TEXT NOT NULL DEFAULT 'global',
-            cd TEXT NOT NULL DEFAULT 'TODOS',
-            descricao TEXT,
-            active INTEGER NOT NULL DEFAULT 1,
-            created_by TEXT,
-            created_at TEXT NOT NULL,
-            updated_by TEXT,
-            updated_at TEXT,
-            UNIQUE(nome, contexto, cd)
-        );
-        CREATE TABLE IF NOT EXISTS visualization_view_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            view_id INTEGER NOT NULL,
-            cd TEXT NOT NULL,
-            grupo TEXT NOT NULL,
-            indicador TEXT NOT NULL,
-            codigo_indicador TEXT,
-            sort_order INTEGER NOT NULL DEFAULT 999,
-            FOREIGN KEY(view_id) REFERENCES visualization_views(id) ON DELETE CASCADE,
-            UNIQUE(view_id, cd, grupo, indicador)
-        );
-        """
+    """Cria/migra o schema usando conexão administrativa sem auto-upload.
+
+    Esta função só deve ser executada pelo bootstrap_database(), protegido por lock.
+    """
+    db_path = Path(DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ok, detail = _sqlite_quick_check(db_path)
+    if not ok:
+        raise sqlite3.DatabaseError(
+            "Banco SQLite reprovado no PRAGMA quick_check antes da inicialização: " + detail
+        )
+
+    # IMPORTANTE: conexão SQLite padrão, sem GitHubPersistedSQLiteConnection.
+    # Assim CREATE/ALTER/seed não dispara upload para o GitHub no meio da migração.
+    conn = sqlite3.connect(
+        str(db_path),
+        timeout=60,
+        check_same_thread=False,
+        isolation_level="IMMEDIATE",
     )
-    # Migração leve para bancos criados em versões anteriores.
-    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(indicator_config)").fetchall()}
-    if "meta_ref_grupo" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN meta_ref_grupo TEXT")
-    if "meta_ref_indicador" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN meta_ref_indicador TEXT")
-    if "codigo_indicador" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN codigo_indicador TEXT")
-    if "dashboard_titulo" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN dashboard_titulo TEXT")
-    if "exibir_dashboard_dia" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN exibir_dashboard_dia INTEGER NOT NULL DEFAULT 1")
-    if "exibir_dashboard_mes" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN exibir_dashboard_mes INTEGER NOT NULL DEFAULT 1")
-    if "exibir_referencia_card" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN exibir_referencia_card INTEGER NOT NULL DEFAULT 1")
-    if "card_ref_grupo" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN card_ref_grupo TEXT")
-    if "card_ref_indicador" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN card_ref_indicador TEXT")
-    if "exibir_total_mes" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN exibir_total_mes INTEGER NOT NULL DEFAULT 0")
-    if "exibir_atingimento_mes" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN exibir_atingimento_mes INTEGER NOT NULL DEFAULT 0")
-    if "exibir_objetivo_mes_dashboard" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN exibir_objetivo_mes_dashboard INTEGER NOT NULL DEFAULT 0")
-    if "total_mes_ref_grupo" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN total_mes_ref_grupo TEXT")
-    if "total_mes_ref_indicador" not in existing_cols:
-        conn.execute("ALTER TABLE indicator_config ADD COLUMN total_mes_ref_indicador TEXT")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000;")
+    conn.execute("PRAGMA foreign_keys=ON;")
 
-    value_cols = {r[1] for r in conn.execute("PRAGMA table_info(values_indicators)").fetchall()}
-    if "codigo_indicador" not in value_cols:
-        conn.execute("ALTER TABLE values_indicators ADD COLUMN codigo_indicador TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_values_codigo ON values_indicators(data, cd, codigo_indicador)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_values_cd_data ON values_indicators(cd, data)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_values_cd_grupo_indicador_data ON values_indicators(cd, grupo, indicador, data)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_cd_datas ON target_versions(cd, data_inicio, data_fim)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_views_lookup ON dashboard_card_views(username, cd, active, is_default)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_view_items_view ON dashboard_card_view_items(view_id, sort_order)")
+    try:
+        cur = conn.cursor()
+        cur.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                full_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'operador',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_permissions (
+                username TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                updated_by TEXT,
+                updated_at TEXT,
+                UNIQUE(username, permission)
+            );
+            CREATE TABLE IF NOT EXISTS user_centers (
+                username TEXT NOT NULL,
+                cd TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(username, cd)
+            );
+            CREATE TABLE IF NOT EXISTS centers (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                created_by TEXT
+            );
+            CREATE TABLE IF NOT EXISTS values_indicators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data TEXT NOT NULL,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                valor REAL,
+                source TEXT NOT NULL,
+                batch_id TEXT,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT,
+                UNIQUE(data, cd, grupo, indicador)
+            );
+            CREATE TABLE IF NOT EXISTS work_calendar (
+                cd TEXT NOT NULL,
+                data TEXT NOT NULL,
+                trabalhado INTEGER NOT NULL DEFAULT 1,
+                observacao TEXT,
+                updated_by TEXT,
+                updated_at TEXT,
+                UNIQUE(cd, data)
+            );
+            CREATE TABLE IF NOT EXISTS audit_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data TEXT NOT NULL,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                valor_anterior REAL,
+                valor_novo REAL,
+                motivo TEXT NOT NULL,
+                changed_by TEXT NOT NULL,
+                changed_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL UNIQUE,
+                filename TEXT NOT NULL,
+                cd TEXT NOT NULL,
+                rows_received INTEGER NOT NULL,
+                rows_inserted INTEGER NOT NULL,
+                rows_updated INTEGER NOT NULL,
+                imported_by TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                motivo TEXT
+            );
+            CREATE TABLE IF NOT EXISTS indicator_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                codigo_indicador TEXT,
+                grupo_ordem INTEGER DEFAULT 999,
+                indicador_ordem INTEGER DEFAULT 999,
+                nivel INTEGER DEFAULT 0,
+                tipo_campo TEXT NOT NULL DEFAULT 'dado_diario',
+                formato TEXT NOT NULL DEFAULT 'numero',
+                direcao_meta TEXT NOT NULL DEFAULT 'maior_melhor',
+                exibir_painel_matricial INTEGER NOT NULL DEFAULT 1,
+                exibir_dashboard INTEGER NOT NULL DEFAULT 0,
+                exibir_dashboard_dia INTEGER NOT NULL DEFAULT 1,
+                exibir_dashboard_mes INTEGER NOT NULL DEFAULT 1,
+                exibir_referencia_card INTEGER NOT NULL DEFAULT 1,
+                card_ref_grupo TEXT,
+                card_ref_indicador TEXT,
+                exibir_meta_como_linha INTEGER NOT NULL DEFAULT 0,
+                exibir_total_mes INTEGER NOT NULL DEFAULT 0,
+                exibir_atingimento_mes INTEGER NOT NULL DEFAULT 0,
+                exibir_objetivo_mes_dashboard INTEGER NOT NULL DEFAULT 0,
+                total_mes_ref_grupo TEXT,
+                total_mes_ref_indicador TEXT,
+                usar_sinaleira INTEGER NOT NULL DEFAULT 0,
+                tolerancia_amarela REAL NOT NULL DEFAULT 0.05,
+                formula TEXT,
+                meta_ref_grupo TEXT,
+                meta_ref_indicador TEXT,
+                ativo INTEGER NOT NULL DEFAULT 1,
+                updated_by TEXT,
+                updated_at TEXT,
+                UNIQUE(cd, grupo, indicador)
+            );
+            CREATE TABLE IF NOT EXISTS target_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                valor_meta REAL NOT NULL,
+                direcao_meta TEXT NOT NULL DEFAULT 'maior_melhor',
+                data_inicio TEXT NOT NULL,
+                data_fim TEXT,
+                ativo INTEGER NOT NULL DEFAULT 1,
+                exibir_dashboard INTEGER NOT NULL DEFAULT 0,
+                exibir_painel_matricial INTEGER NOT NULL DEFAULT 1,
+                exibir_meta_como_linha INTEGER NOT NULL DEFAULT 0,
+                usar_sinaleira INTEGER NOT NULL DEFAULT 1,
+                tolerancia_amarela REAL NOT NULL DEFAULT 0.05,
+                motivo TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS monthly_objectives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                codigo_indicador TEXT,
+                mes_ref TEXT NOT NULL,
+                valor_objetivo REAL NOT NULL,
+                direcao_meta TEXT NOT NULL DEFAULT 'maior_melhor',
+                tolerancia_amarela REAL NOT NULL DEFAULT 0.05,
+                active INTEGER NOT NULL DEFAULT 1,
+                motivo TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT,
+                UNIQUE(cd, grupo, indicador, mes_ref)
+            );
+            CREATE TABLE IF NOT EXISTS config_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entidade TEXT NOT NULL,
+                cd TEXT,
+                grupo TEXT,
+                indicador TEXT,
+                campo TEXT,
+                valor_anterior TEXT,
+                valor_novo TEXT,
+                motivo TEXT NOT NULL,
+                changed_by TEXT NOT NULL,
+                changed_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_card_config (
+                username TEXT NOT NULL,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT,
+                UNIQUE(username, cd, grupo, indicador)
+            );
+            CREATE TABLE IF NOT EXISTS dashboard_card_views (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                cd TEXT NOT NULL,
+                nome TEXT NOT NULL,
+                descricao TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                UNIQUE(username, cd, nome)
+            );
+            CREATE TABLE IF NOT EXISTS dashboard_card_view_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                view_id INTEGER NOT NULL,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                codigo_indicador TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 999,
+                FOREIGN KEY(view_id) REFERENCES dashboard_card_views(id) ON DELETE CASCADE,
+                UNIQUE(view_id, cd, grupo, indicador)
+            );
+            CREATE TABLE IF NOT EXISTS visualization_views (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL,
+                contexto TEXT NOT NULL DEFAULT 'global',
+                cd TEXT NOT NULL DEFAULT 'TODOS',
+                descricao TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT,
+                UNIQUE(nome, contexto, cd)
+            );
+            CREATE TABLE IF NOT EXISTS visualization_view_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                view_id INTEGER NOT NULL,
+                cd TEXT NOT NULL,
+                grupo TEXT NOT NULL,
+                indicador TEXT NOT NULL,
+                codigo_indicador TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 999,
+                FOREIGN KEY(view_id) REFERENCES visualization_views(id) ON DELETE CASCADE,
+                UNIQUE(view_id, cd, grupo, indicador)
+            );
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                chave TEXT PRIMARY KEY,
+                valor TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
 
-    # Migração para permitir uploads com valor em branco.
-    # Versões anteriores criaram values_indicators.valor e audit_changes.valor_novo como NOT NULL.
-    def _recreate_table_if_notnull(table_name: str, nullable_columns: set[str]) -> None:
-        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        if not cols:
-            return
-        must_recreate = any(c[1] in nullable_columns and int(c[3]) == 1 for c in cols)
-        if not must_recreate:
-            return
-        sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone()
-        if not sql_row or not sql_row[0]:
-            return
-        create_sql = sql_row[0]
-        new_table = f"{table_name}_new"
-        create_new = create_sql.replace(f"CREATE TABLE {table_name}", f"CREATE TABLE {new_table}").replace(f"CREATE TABLE IF NOT EXISTS {table_name}", f"CREATE TABLE {new_table}")
-        for col in nullable_columns:
-            create_new = create_new.replace(f"{col} REAL NOT NULL", f"{col} REAL")
-            create_new = create_new.replace(f"{col} TEXT NOT NULL", f"{col} TEXT")
-        conn.execute(create_new)
-        col_names = [c[1] for c in cols]
-        joined = ", ".join(col_names)
-        conn.execute(f"INSERT INTO {new_table} ({joined}) SELECT {joined} FROM {table_name}")
-        conn.execute(f"DROP TABLE {table_name}")
-        conn.execute(f"ALTER TABLE {new_table} RENAME TO {table_name}")
+        # Migrações leves para bancos de versões anteriores.
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(indicator_config)").fetchall()}
+        migrations = [
+            ("meta_ref_grupo", "ALTER TABLE indicator_config ADD COLUMN meta_ref_grupo TEXT"),
+            ("meta_ref_indicador", "ALTER TABLE indicator_config ADD COLUMN meta_ref_indicador TEXT"),
+            ("codigo_indicador", "ALTER TABLE indicator_config ADD COLUMN codigo_indicador TEXT"),
+            ("dashboard_titulo", "ALTER TABLE indicator_config ADD COLUMN dashboard_titulo TEXT"),
+            ("exibir_dashboard_dia", "ALTER TABLE indicator_config ADD COLUMN exibir_dashboard_dia INTEGER NOT NULL DEFAULT 1"),
+            ("exibir_dashboard_mes", "ALTER TABLE indicator_config ADD COLUMN exibir_dashboard_mes INTEGER NOT NULL DEFAULT 1"),
+            ("exibir_referencia_card", "ALTER TABLE indicator_config ADD COLUMN exibir_referencia_card INTEGER NOT NULL DEFAULT 1"),
+            ("card_ref_grupo", "ALTER TABLE indicator_config ADD COLUMN card_ref_grupo TEXT"),
+            ("card_ref_indicador", "ALTER TABLE indicator_config ADD COLUMN card_ref_indicador TEXT"),
+            ("exibir_total_mes", "ALTER TABLE indicator_config ADD COLUMN exibir_total_mes INTEGER NOT NULL DEFAULT 0"),
+            ("exibir_atingimento_mes", "ALTER TABLE indicator_config ADD COLUMN exibir_atingimento_mes INTEGER NOT NULL DEFAULT 0"),
+            ("exibir_objetivo_mes_dashboard", "ALTER TABLE indicator_config ADD COLUMN exibir_objetivo_mes_dashboard INTEGER NOT NULL DEFAULT 0"),
+            ("total_mes_ref_grupo", "ALTER TABLE indicator_config ADD COLUMN total_mes_ref_grupo TEXT"),
+            ("total_mes_ref_indicador", "ALTER TABLE indicator_config ADD COLUMN total_mes_ref_indicador TEXT"),
+        ]
+        for col_name, ddl in migrations:
+            if col_name not in existing_cols:
+                conn.execute(ddl)
 
-    _recreate_table_if_notnull("values_indicators", {"valor"})
-    _recreate_table_if_notnull("audit_changes", {"valor_novo"})
+        value_cols = {r[1] for r in conn.execute("PRAGMA table_info(values_indicators)").fetchall()}
+        if "codigo_indicador" not in value_cols:
+            conn.execute("ALTER TABLE values_indicators ADD COLUMN codigo_indicador TEXT")
 
-    now = now_iso()
-    cur.executemany(
-        "INSERT OR IGNORE INTO users(username, full_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-        [
-            ("admin", "Administrador", hash_password("admin123"), "admin", now),
-            ("operador", "Operador PCP", hash_password("op123"), "operador", now),
-        ],
-    )
-    cur.executemany(
-        "INSERT OR IGNORE INTO centers(code, name, created_at, created_by) VALUES (?, ?, ?, ?)",
-        [("SBC", "São Bernardo do Campo", now, "seed"), ("RS", "Rio Grande do Sul", now, "seed")],
-    )
-    conn.commit()
-    conn.close()
+        # Migração para permitir valor em branco em bases antigas.
+        def _recreate_table_if_notnull(table_name: str, nullable_columns: set[str]) -> None:
+            cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            if not cols:
+                return
+
+            must_recreate = any(
+                c[1] in nullable_columns and int(c[3]) == 1
+                for c in cols
+            )
+            if not must_recreate:
+                return
+
+            sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if not sql_row or not sql_row[0]:
+                return
+
+            new_table = f"{table_name}_new"
+            conn.execute(f"DROP TABLE IF EXISTS {new_table}")
+
+            create_sql = str(sql_row[0])
+            create_new = create_sql.replace(
+                f"CREATE TABLE {table_name}",
+                f"CREATE TABLE {new_table}",
+                1,
+            ).replace(
+                f"CREATE TABLE IF NOT EXISTS {table_name}",
+                f"CREATE TABLE {new_table}",
+                1,
+            )
+
+            for col in nullable_columns:
+                create_new = create_new.replace(f"{col} REAL NOT NULL", f"{col} REAL")
+                create_new = create_new.replace(f"{col} TEXT NOT NULL", f"{col} TEXT")
+
+            conn.execute(create_new)
+            col_names = [c[1] for c in cols]
+            joined = ", ".join(f'"{c}"' for c in col_names)
+            conn.execute(
+                f"INSERT INTO {new_table} ({joined}) SELECT {joined} FROM {table_name}"
+            )
+            conn.execute(f"DROP TABLE {table_name}")
+            conn.execute(f"ALTER TABLE {new_table} RENAME TO {table_name}")
+
+        _recreate_table_if_notnull("values_indicators", {"valor"})
+        _recreate_table_if_notnull("audit_changes", {"valor_novo"})
+
+        # Índices vêm DEPOIS de possíveis recriações de tabela.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_values_codigo ON values_indicators(data, cd, codigo_indicador)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_values_cd_data ON values_indicators(cd, data)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_values_cd_grupo_indicador_data ON values_indicators(cd, grupo, indicador, data)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_targets_cd_datas ON target_versions(cd, data_inicio, data_fim)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_views_lookup ON dashboard_card_views(username, cd, active, is_default)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_view_items_view ON dashboard_card_view_items(view_id, sort_order)")
+
+        now = now_iso()
+        cur.executemany(
+            "INSERT OR IGNORE INTO users(username, full_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("admin", "Administrador", hash_password("admin123"), "admin", now),
+                ("operador", "Operador PCP", hash_password("op123"), "operador", now),
+            ],
+        )
+        cur.executemany(
+            "INSERT OR IGNORE INTO centers(code, name, created_at, created_by) VALUES (?, ?, ?, ?)",
+            [
+                ("SBC", "São Bernardo do Campo", now, "seed"),
+                ("RS", "Rio Grande do Sul", now, "seed"),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO schema_meta(chave, valor, updated_at)
+            VALUES ('schema_version', '2026.07.24.1', ?)
+            ON CONFLICT(chave) DO UPDATE SET
+                valor=excluded.valor,
+                updated_at=excluded.updated_at
+            """,
+            (now,),
+        )
+        conn.commit()
+
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    # Seeds que dependem de funções declaradas mais abaixo.
+    # O bootstrap marca "initializing=True", então estes commits NÃO sobem
+    # snapshots intermediários ao GitHub.
     seed_permissions()
     seed_indicator_config()
     ensure_indicator_codes()
     ensure_default_visualization_views()
 
+    ok, detail = _sqlite_quick_check(db_path)
+    if not ok:
+        raise sqlite3.DatabaseError(
+            "Banco SQLite reprovado no PRAGMA quick_check após a inicialização: " + detail
+        )
+
+
+def bootstrap_database() -> None:
+    """Executa download + configuração + migração uma única vez por processo.
+
+    Todos os reruns e sessões posteriores apenas retornam.
+    """
+    state = _db_runtime_state()
+    if state.get("startup_done"):
+        return
+
+    with state["startup_lock"]:
+        if state.get("startup_done"):
+            return
+
+        state["initializing"] = True
+        try:
+            # A sequência inteira fica serializada: ninguém inicializa enquanto
+            # outra sessão está substituindo/baixando o .db.
+            sync_sqlite_from_github_on_startup()
+            _configure_sqlite_file()
+            init_db()
+
+            ok, detail = _sqlite_quick_check(Path(DB_PATH))
+            if not ok:
+                raise sqlite3.DatabaseError(
+                    "Banco SQLite reprovado no quick_check do bootstrap: " + detail
+                )
+
+            state["startup_done"] = True
+        finally:
+            state["initializing"] = False
+
+        # Somente após TODAS as migrações/seeds terminarem permitimos um upload.
+        # Se o hash for igual ao remoto, sync_sqlite_to_github() simplesmente não envia.
+        if github_storage_enabled():
+            try:
+                with state["github_sync_lock"]:
+                    sync_sqlite_to_github(
+                        "bootstrap/migração concluída",
+                        force=False,
+                    )
+            except Exception as exc:
+                try:
+                    st.session_state["github_storage_warning"] = (
+                        f"Banco inicializado, mas não foi possível sincronizar ao GitHub: {exc}"
+                    )
+                except Exception:
+                    pass
 
 def seed_permissions() -> None:
     conn = get_conn()
@@ -8983,8 +9159,17 @@ def page_audit() -> None:
 # ----------------------------- main -----------------------------
 
 def main() -> None:
-    sync_sqlite_from_github_on_startup()
-    init_db()
+    try:
+        bootstrap_database()
+    except sqlite3.DatabaseError as exc:
+        st.error("Falha de integridade/inicialização do banco SQLite.")
+        st.code(str(exc))
+        st.info("Reinicie o app após confirmar/restaurar data/indicadores.db no GitHub.")
+        st.stop()
+    except Exception as exc:
+        st.error("Falha ao inicializar o banco do Painel PCP.")
+        st.code(str(exc))
+        st.stop()
     if not require_login():
         return
     page = sidebar_nav()
