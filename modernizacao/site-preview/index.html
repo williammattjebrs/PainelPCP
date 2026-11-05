@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Prévia visual do novo Painel PCP — ambiente demonstrativo.">
+<title>Painel PCP · Prévia</title><link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand"><div class="brand-icon">PC</div><div><strong>Painel PCP</strong><small>BR Supply · Preview</small></div></div>
+  <div class="nav-caption">WORKSPACE</div>
+  <nav id="nav">
+   <button class="nav-item active" data-page="overview"><span class="ico">▦</span> Visão geral</button>
+   <button class="nav-item" data-page="matrix"><span class="ico">▤</span> Painel matricial</button>
+   <button class="nav-item" data-page="daily"><span class="ico">◷</span> Visão diária</button>
+   <button class="nav-item" data-page="monthly"><span class="ico">▥</span> Visão mensal</button>
+   <div class="nav-caption nav-space">GESTÃO</div>
+   <button class="nav-item" data-page="imports"><span class="ico">⇧</span> Importações</button>
+   <button class="nav-item" data-page="targets"><span class="ico">◎</span> Metas</button>
+   <button class="nav-item" data-page="indicators"><span class="ico">◈</span> Indicadores</button>
+   <button class="nav-item" data-page="centers"><span class="ico">⌖</span> Centros de distribuição</button>
+   <div class="nav-caption nav-space">CONTROLE</div>
+   <button class="nav-item" data-page="audit"><span class="ico">≡</span> Auditoria</button>
+   <button class="nav-item" data-page="users"><span class="ico">♙</span> Usuários e acessos</button>
+  </nav>
+  <div class="side-bottom"><div class="env-dot"></div><div><b>Ambiente demonstrativo</b><small>Dados fictícios · sem gravação</small></div></div>
+</aside>
+<main class="main">
+<header class="topbar"><button id="menuToggle" class="mobile-menu" aria-label="Abrir menu">☰</button><div class="crumb">Painel PCP <span>/</span> <b id="crumb">Visão geral</b></div><div class="top-right"><span class="demo-pill"><i></i> PRÉVIA COM DADOS FICTÍCIOS</span><button class="icon-btn" aria-label="Notificações">♧<em></em></button><div class="avatar">WM</div><div class="user-meta"><b>William Mattje</b><small>Administrador</small></div></div></header>
+<section class="page">
+ <div class="page-heading"><div><p class="eyebrow">TERÇA-FEIRA, 05 DE NOVEMBRO DE 2026</p><h1 id="pageTitle">Visão geral</h1><p id="pageSub">Acompanhe os resultados da operação em um só lugar.</p></div><div class="heading-actions"><label class="select-wrap">Centro <select id="center"><option value="Todos os CDs">Todos os CDs</option><option value="CD Cajamar">CD Cajamar</option><option value="CD Extrema">CD Extrema</option><option value="CD Recife">CD Recife</option></select></label><button class="button button-light" id="period">◷ <span>Últimos 30 dias</span>⌄</button><button class="button button-primary" id="refresh">↻ <span>Atualizar</span></button></div></div>
+<div class="filter-row"><button class="period-chip active">30 dias</button><button class="period-chip">Este mês</button><button class="period-chip">Trimestre</button><span class="updated">Atualizado há 4 min <span>•</span></span></div>
+<div class="metric-grid">
+ <article class="metric-card"><div class="metric-top"><span>PRODUÇÃO DO MÊS</span><span class="metric-icon orange">▥</span></div><div class="metric-value" id="production">18.426 <small>un.</small></div><div class="metric-foot"><span class="trend positive">↗ 8,4%</span><span>vs. mês anterior</span></div><div class="sparkline spark-orange"><svg viewBox="0 0 120 32" preserveAspectRatio="none"><path d="M0 26 C12 22 16 25 25 18 S39 21 50 14 S62 20 75 11 S88 15 98 7 S110 10 120 3"/></svg></div></article>
+ <article class="metric-card"><div class="metric-top"><span>ATINGIMENTO DA META</span><span class="metric-icon blue">◎</span></div><div class="metric-value">94,8<small>%</small></div><div class="metric-foot"><span class="trend positive">↗ 2,1 p.p.</span><span>meta mensal: 95%</span></div><div class="progress"><i style="width:94.8%"></i></div></article>
+ <article class="metric-card"><div class="metric-top"><span>INDICADORES NO ALVO</span><span class="metric-icon green">◈</span></div><div class="metric-value">12 <small>/ 15</small></div><div class="metric-foot"><span class="trend positive">80%</span><span>dos indicadores ativos</span></div><div class="mini-bars"><i style="height:38%"></i><i style="height:52%"></i><i style="height:44%"></i><i style="height:70%"></i><i style="height:62%"></i><i style="height:83%"></i><i style="height:76%"></i><i style="height:96%"></i><i style="height:78%"></i><i style="height:100%"></i></div></article>
+ <article class="metric-card"><div class="metric-top"><span>DIAS COM APONTAMENTO</span><span class="metric-icon violet">◷</span></div><div class="metric-value">22 <small>/ 24</small></div><div class="metric-foot"><span class="trend neutral">91,7%</span><span>dias úteis registrados</span></div><div class="calendar-dots"><i></i><i></i><i></i><i></i><i></i><i></i><i class="off"></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="off"></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="off"></i><i></i><i></i><i></i></div></article>
+</div>
+<div class="content-grid">
+ <article class="panel chart-panel"><div class="panel-header"><div><h2>Evolução da produção</h2><p>Volume diário · últimos 30 dias</p></div><button class="more">•••</button></div><div class="chart-legend"><span><i class="legend-dot actual"></i>Realizado</span><span><i class="legend-dot target"></i>Meta diária</span><strong>18.426 <small>unidades</small></strong></div><div class="chart" id="chart"></div><div class="chart-labels"><span>07 out</span><span>14 out</span><span>21 out</span><span>28 out</span><span>05 nov</span></div></article>
+ <article class="panel target-panel"><div class="panel-header"><div><h2>Desempenho por CD</h2><p>Atingimento da meta no mês</p></div><button class="more">•••</button></div><div class="target-list">
+  <div class="target-row"><div class="target-name"><span class="cd-avatar ca">CJ</span><div><b>Cajamar</b><small>São Paulo · SP</small></div><strong>102,4%</strong></div><div class="target-track"><i class="good" style="width:98%"></i></div></div>
+  <div class="target-row"><div class="target-name"><span class="cd-avatar ex">EX</span><div><b>Extrema</b><small>Extrema · MG</small></div><strong>96,1%</strong></div><div class="target-track"><i class="good" style="width:91%"></i></div></div>
+  <div class="target-row"><div class="target-name"><span class="cd-avatar re">RE</span><div><b>Recife</b><small>Jaboatão · PE</small></div><strong class="below">84,7%</strong></div><div class="target-track"><i class="warn" style="width:80%"></i></div></div>
+  <div class="target-row"><div class="target-name"><span class="cd-avatar cu">CU</span><div><b>Curitiba</b><small>São José dos Pinhais · PR</small></div><strong>95,8%</strong></div><div class="target-track"><i class="good" style="width:90%"></i></div></div>
+ </div><button class="text-link" data-go="centers">Ver todos os centros <span>→</span></button></article>
+</div>
+<article class="panel table-panel"><div class="panel-header"><div><h2>Indicadores recentes</h2><p>Últimos apontamentos registrados na demonstração</p></div><button class="button button-light small-btn" data-go="matrix">Ver painel completo <span>→</span></button></div>
+<div class="table-wrap"><table><thead><tr><th>INDICADOR</th><th>CENTRO</th><th>REALIZADO</th><th>META</th><th>STATUS</th><th>ÚLTIMA ATUALIZAÇÃO</th><th></th></tr></thead><tbody>
+<tr><td><span class="ind-name"><i class="ind-mark orange-bg">P</i><span><b>Pedidos separados</b><small>Produtividade</small></span></span></td><td>CD Cajamar</td><td><b>1.284</b></td><td>1.200</td><td><span class="status success">● No alvo</span></td><td>Hoje, 10:42</td><td>›</td></tr>
+<tr><td><span class="ind-name"><i class="ind-mark blue-bg">E</i><span><b>Expedição no prazo</b><small>Qualidade</small></span></span></td><td>CD Extrema</td><td><b>96,2%</b></td><td>95,0%</td><td><span class="status success">● No alvo</span></td><td>Hoje, 10:18</td><td>›</td></tr>
+<tr><td><span class="ind-name"><i class="ind-mark violet-bg">A</i><span><b>Acuracidade de estoque</b><small>Qualidade</small></span></span></td><td>CD Recife</td><td><b>98,7%</b></td><td>99,0%</td><td><span class="status warning">● Atenção</span></td><td>Hoje, 09:56</td><td>›</td></tr>
+<tr><td><span class="ind-name"><i class="ind-mark green-bg">T</i><span><b>Tempo de separação</b><small>Eficiência</small></span></span></td><td>CD Cajamar</td><td><b>18,4 min</b></td><td>20,0 min</td><td><span class="status success">● No alvo</span></td><td>Hoje, 09:31</td><td>›</td></tr>
+<tr><td><span class="ind-name"><i class="ind-mark red-bg">D</i><span><b>Divergências de pedidos</b><small>Qualidade</small></span></span></td><td>CD Curitiba</td><td><b>1,8%</b></td><td>1,0%</td><td><span class="status danger">● Fora da meta</span></td><td>Hoje, 08:47</td><td>›</td></tr>
+</tbody></table></div><footer class="table-footer"><span>Exibindo <b>5</b> de 24 indicadores</span><div><button disabled>‹</button><button class="page-current">1</button><button>2</button><button>3</button><button>›</button></div></footer></article>
+<footer class="footer"><span>© 2026 BR Supply · Painel PCP</span><span>Esta é uma prévia visual. <b>Nenhum dado real está conectado.</b></span></footer>
+</section>
+</main>
+</div><div id="toast" role="status"></div><script src="./app.js"></script>
+</body></html>
+
+
