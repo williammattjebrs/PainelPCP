@@ -57,6 +57,16 @@ class HistorySafetyTests(unittest.TestCase):
             api._db()
         self.assertEqual(error.exception.status_code, 503)
 
+    def test_new_password_hash_is_salted_and_verifiable(self):
+        stored = api._password_hash("senha-local-forte-123")
+        self.assertTrue(stored.startswith("pbkdf2_sha256$"))
+        self.assertEqual(api._verify_password(stored, "senha-local-forte-123"), (True, False))
+        self.assertEqual(api._verify_password(stored, "senha-incorreta"), (False, False))
+
+    def test_legacy_hash_is_recognized_for_upgrade(self):
+        legacy = __import__("hashlib").sha256("test-salt:senha-antiga".encode()).hexdigest()
+        self.assertEqual(api._verify_password(legacy, "senha-antiga"), (True, True))
+
 
 if __name__ == "__main__":
     unittest.main()
