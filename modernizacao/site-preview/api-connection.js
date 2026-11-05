@@ -109,7 +109,10 @@ async function loadSummary(){
  updateCenters(Array.isArray(rows)?rows:[]);
  setStatus("API local conectada · somente consulta nesta prévia");
 }
-async function connect(username,password){
+async function setLatestDate(){
+ const latest=await request("/api/values?limit=1");
+ if(Array.isArray(latest)&&latest.length&&latest[0].data)dayInput.value=latest[0].data;
+}\nasync function connect(username,password){
  const health=await request("/api/health",{});
  if(health.status!=="ok")throw new Error("API local indisponível ou cópia de teste inválida.");
  const response=await fetch(API+"/api/auth/login",{method:"POST",mode:"cors",credentials:"omit",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
@@ -120,6 +123,7 @@ async function connect(username,password){
  }
  const data=await response.json();token=data.access_token;user=data.user;sessionStorage.setItem(tokenKey,token);
  centers=await request("/api/centers");
+ await setLatestDate();
  centerSelect.replaceChildren();
  const all=document.createElement("option");all.value="";all.textContent="Todos os CDs";centerSelect.appendChild(all);
  centers.forEach(c=>{const option=document.createElement("option");option.value=c.code;option.textContent=c.code+" · "+c.name;centerSelect.appendChild(option)});
@@ -146,7 +150,8 @@ document.querySelectorAll(".period-chip").forEach(button=>button.addEventListene
  loadSummary().catch(e=>{setStatus(e.message);notice(e.message)});
 }));
 if(token){
- request("/api/auth/me",{}).then(async current=>{user=current;centers=await request("/api/centers");const all=document.createElement("option");all.value="";all.textContent="Todos os CDs";centerSelect.replaceChildren(all);centers.forEach(c=>{const o=document.createElement("option");o.value=c.code;o.textContent=c.code+" · "+c.name;centerSelect.appendChild(o)});await loadSummary();setMode(true)}).catch(()=>{sessionStorage.removeItem(tokenKey);token="";setMode(false);setStatus("Sessão local expirada; os dados fictícios continuam visíveis.")});
+ request("/api/auth/me",{}).then(async current=>{user=current;centers=await request("/api/centers");
+ await setLatestDate();const all=document.createElement("option");all.value="";all.textContent="Todos os CDs";centerSelect.replaceChildren(all);centers.forEach(c=>{const o=document.createElement("option");o.value=c.code;o.textContent=c.code+" · "+c.name;centerSelect.appendChild(o)});await loadSummary();setMode(true)}).catch(()=>{sessionStorage.removeItem(tokenKey);token="";setMode(false);setStatus("Sessão local expirada; os dados fictícios continuam visíveis.")});
 }
 })();
 
