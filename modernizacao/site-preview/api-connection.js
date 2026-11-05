@@ -112,7 +112,8 @@ async function loadSummary(){
 async function setLatestDate(){
  const latest=await request("/api/values?limit=1");
  if(Array.isArray(latest)&&latest.length&&latest[0].data)dayInput.value=latest[0].data;
-}\nasync function connect(username,password){
+}
+async function connect(username,password){
  const health=await request("/api/health",{});
  if(health.status!=="ok")throw new Error("API local indisponível ou cópia de teste inválida.");
  const response=await fetch(API+"/api/auth/login",{method:"POST",mode:"cors",credentials:"omit",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
