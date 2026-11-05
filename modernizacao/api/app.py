@@ -21,6 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from database import connect as db_connect, transaction as db_transaction, verify_database
+
 APP_DIR = Path(__file__).resolve().parent
 ROOT = APP_DIR.parents[1]
 DB_PATH = Path(os.getenv("PCP_DB_PATH", APP_DIR / "runtime" / "indicadores_teste.db"))
@@ -61,29 +63,19 @@ app.add_middleware(
 
 
 def _db() -> sqlite3.Connection:
-    if DB_PATH.resolve() == PRODUCTION_DB:
-        raise HTTPException(503, "A API de preview não pode abrir o banco operacional.")
-    if not DB_PATH.is_file():
-        raise HTTPException(503, "Banco de teste ausente. Rode scripts/copy_test_db.py.")
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
+    try:
+        return db_connect(DB_PATH, PRODUCTION_DB)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 @contextmanager
 def transaction():
-    conn = _db()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        with db_transaction(DB_PATH, PRODUCTION_DB) as conn:
+            yield conn
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 def _secret(name: str) -> str:
@@ -197,26 +189,8 @@ def _scope_center(user: dict[str, Any], cd: str | None) -> None:
         raise HTTPException(403, "CD fora do escopo deste usuário.")
 
 
-def _tables(conn: sqlite3.Connection) -> set[str]:
-    return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-
-
 def _verify_database() -> dict[str, Any]:
-    if DB_PATH.resolve() == PRODUCTION_DB:
-        return {"ok": False, "reason": "production_path"}
-    if not DB_PATH.is_file():
-        return {"ok": False, "reason": "test_database_missing", "path": str(DB_PATH)}
-    conn = sqlite3.connect(f"file:{DB_PATH.as_posix()}?mode=ro", uri=True)
-    try:
-        tables = _tables(conn)
-        absent = sorted(REQUIRED_TABLES - tables)
-        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        if absent or integrity != "ok":
-            return {"ok": False, "reason": "invalid_database", "missing_tables": absent, "integrity": integrity}
-        return {"ok": True, "integrity": integrity, "table_count": len(tables)}
-    finally:
-        conn.close()
-
+    return verify_database(DB_PATH, PRODUCTION_DB, REQUIRED_TABLES)
 
 @app.on_event("startup")
 def startup_check() -> None:
