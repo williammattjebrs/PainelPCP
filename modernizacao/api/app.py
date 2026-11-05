@@ -9,6 +9,8 @@ import json
 import os
 import sqlite3
 import time
+
+import pandas as pd
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -453,21 +455,38 @@ def _normalize_import_rows(raw_rows: list[dict[str, Any]], conn: sqlite3.Connect
             "data": parsed_date, "cd": cd, "grupo": cfg["grupo"], "indicador": cfg["indicador"],
             "codigo_indicador": cfg["codigo_indicador"], "valor": val,
         })
+    # Impede que um mesmo indicador/data apareça duas vezes na mesma carga.
+    seen: dict[tuple[str, str, str], int] = {}
+    duplicate_indexes: set[int] = set()
+    for index, item in enumerate(accepted):
+        identity = (item["data"], item["cd"], str(item["codigo_indicador"] or item["grupo"] + "|" + item["indicador"]))
+        if identity in seen:
+            duplicate_indexes.add(seen[identity])
+            duplicate_indexes.add(index)
+            rejected.append({"row": item, "reason": "Chave de data/CD/indicador duplicada no arquivo"})
+        else:
+            seen[identity] = index
+    accepted = [item for index, item in enumerate(accepted) if index not in duplicate_indexes]
     return accepted, rejected
 
 
 @app.post("/api/imports/preview")
 async def import_preview(file: UploadFile = File(...), user: dict[str, Any] = Depends(require("import_data"))):
     raw = await file.read()
-    text = raw.decode("utf-8-sig")
-    sample = text[:4096]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t,")
-    except csv.Error:
-        dialect = csv.excel
-        dialect.delimiter = ";" if sample.count(";") > sample.count(",") else ","
-    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
-    raw_rows = list(reader)
+    filename = (file.filename or "").lower()
+    if filename.endswith(".xlsx"):
+        frame = pd.read_excel(io.BytesIO(raw), dtype=object)
+        raw_rows = frame.where(pd.notna(frame), None).to_dict("records")
+    else:
+        text = raw.decode("utf-8-sig")
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=";,\t,")
+        except csv.Error:
+            dialect = csv.excel
+            dialect.delimiter = ";" if sample.count(";") > sample.count(",") else ","
+        reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+        raw_rows = list(reader)
     conn = _db()
     try:
         accepted, rejected = _normalize_import_rows(raw_rows, conn, user)
