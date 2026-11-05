@@ -18,7 +18,13 @@ function setStatus(text){$("dataStatus").textContent=text}
 function setMode(connected){
  badge.classList.toggle("connected",connected);
  badge.innerHTML=connected?"<i></i> BANCO DE TESTE LOCAL":"<i></i> DADOS FICTÍCIOS";
+ document.body.classList.toggle("data-connected",connected);
  $("connectOpen").hidden=connected;$("disconnect").hidden=!connected;
+ const environment=document.querySelector(".side-bottom");
+ environment.querySelector("b").textContent=connected?"Banco de teste local":"Ambiente demonstrativo";
+ environment.querySelector("small").textContent=connected?"Dados locais · somente leitura":"Dados fictícios · sem gravação";
+ const footer=document.querySelector(".footer span:last-child");
+ footer.textContent=connected?"Dados da cópia local · consultas somente leitura.":"Esta é uma prévia visual. Nenhum dado real está conectado.";
 }
 async function request(path,options){
  const headers=new Headers(options&&options.headers||{});
@@ -55,6 +61,7 @@ function updateKpis(rows,day){
 }
 function updateTable(rows){
  const table=document.querySelector(".table-panel table");
+ document.querySelector(".table-panel .panel-header p").textContent="Registros da cópia local · "+dateLabel(dayInput.value);
  const head=table.querySelector("thead tr"),body=table.querySelector("tbody");
  ["INDICADOR","CD","VALOR","ORIGEM","ATUALIZADO"].forEach((label,i)=>{
   const th=head.children[i]||document.createElement("th");th.textContent=label;if(!th.parentNode)head.appendChild(th);
