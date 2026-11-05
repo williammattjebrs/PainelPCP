@@ -9,6 +9,9 @@ on:
     paths:
       - "modernizacao/**"
       - ".github/workflows/modernizacao-preview.yml"
+concurrency:
+  group: modernizacao-preview-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   api-and-frontend:
     runs-on: ubuntu-latest
