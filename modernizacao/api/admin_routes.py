@@ -147,6 +147,7 @@ def save_monthly_objective(body: MonthlyObjectiveInput, user: dict[str, Any] = D
 
 @app.get("/api/visualization-views")
 def list_views(contexto: str = "global", cd: str = "TODOS", user: dict[str, Any] = Depends(authenticated)):
+    _scope_center(user, cd if cd != "TODOS" else None)
     conn = _db()
     try:
         rows = conn.execute(
@@ -165,6 +166,7 @@ def get_view(view_id: int, user: dict[str, Any] = Depends(authenticated)):
         view = conn.execute("SELECT * FROM visualization_views WHERE id=? AND active=1",(view_id,)).fetchone()
         if not view:
             raise HTTPException(404,"Visão não encontrada.")
+        _scope_center(user, view["cd"] if view["cd"] != "TODOS" else None)
         items = conn.execute("SELECT * FROM visualization_view_items WHERE view_id=? ORDER BY sort_order",(view_id,)).fetchall()
         return {"view":dict(view),"items":[dict(r) for r in items]}
     finally:
@@ -206,6 +208,7 @@ def deactivate_view(view_id: int, user: dict[str, Any] = Depends(require("config
         view = conn.execute("SELECT * FROM visualization_views WHERE id=?",(view_id,)).fetchone()
         if not view:
             raise HTTPException(404,"Visão não encontrada.")
+        _scope_center(user, view["cd"] if view["cd"] != "TODOS" else None)
         conn.execute("UPDATE visualization_views SET active=0,updated_by=?,updated_at=? WHERE id=?",(user["username"],_now(),view_id))
         conn.execute(
             "INSERT INTO config_audit(entidade,cd,campo,valor_anterior,valor_novo,motivo,changed_by,changed_at) VALUES(?,?,?,?,?,?,?,?)",
