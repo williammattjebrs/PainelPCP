@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app import PERMISSIONS, _db, _now, _scope_center, app, authenticated, require, transaction
+from app import PERMISSIONS, _db, _now, _scope_center, app, authenticated, require, require_any, transaction
 
 
 class PermissionUpdate(BaseModel):
@@ -103,7 +103,7 @@ def update_user_permissions(
 
 
 @app.get("/api/monthly-objectives")
-def list_monthly_objectives(cd: str | None = None, mes_ref: str | None = None, user: dict[str, Any] = Depends(require("view_monthly"))):
+def list_monthly_objectives(cd: str | None = None, mes_ref: str | None = None, user: dict[str, Any] = Depends(require_any("view_monthly", "configure_targets"))):
     _scope_center(user, cd)
     conn = _db()
     try:
