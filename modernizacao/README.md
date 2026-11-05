@@ -29,4 +29,7 @@ Há navegação React para dashboard, matriz, visão diária/mensal, importaçã
 
 ## Conferência da cópia
 
+A lista de fluxos implementados e pendentes está em `modernizacao/FEATURE_PARITY.md`. A troca do Streamlit não deve ser considerada até todos os fluxos ficarem completos e validados nessa matriz.
+
+
 O script de cópia cria um manifesto local com contagem de cada tabela e datas mínima/máxima. Rode `python modernizacao/scripts/verify_test_db.py` logo após criar a cópia e antes de testar gravações.
