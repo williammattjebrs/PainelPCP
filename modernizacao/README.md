@@ -15,7 +15,7 @@ Esta pasta contém a nova interface em desenvolvimento. O Streamlit na raiz perm
 1. `python modernizacao/scripts/copy_test_db.py`
 2. Copie `modernizacao/api/.env.example` para `modernizacao/api/.env` e preencha os segredos localmente.
 3. Instale dependências: `python -m pip install -r modernizacao/api/requirements.txt`
-4. Inicie a API: `python -m uvicorn app:app --app-dir modernizacao/api --env-file modernizacao/api/.env --reload --host 127.0.0.1 --port 8000`
+4. Inicie a API: `python -m uvicorn app:app --app-dir modernizacao/api --env-file modernizacao/api/.env --reload --host 127.0.0.1 --port 8001`
 5. Em outro terminal: `cd modernizacao/frontend; npm install; npm run dev`
 6. Acesse `http://localhost:5173`.
 
@@ -26,7 +26,7 @@ Sem uma cópia do banco, a API falha de forma fechada; ela não cria banco vazio
 
 1. Crie a cópia com `python modernizacao/scripts/copy_test_db.py` e confira o manifesto com `python modernizacao/scripts/verify_test_db.py`. O script não sobrescreve uma cópia existente.
 2. Copie `modernizacao/api/.env.example` para `modernizacao/api/.env`. Configure o salt legado e um segredo aleatório local; não versione o arquivo.
-3. Inicie a API **somente em loopback**: `python -m uvicorn app:app --app-dir modernizacao/api --env-file modernizacao/api/.env --reload --host 127.0.0.1 --port 8000`.
+3. Inicie a API na porta **8001**, em loopback (a porta 8000 está ocupada pelo outro painel): `python -m uvicorn app:app --app-dir modernizacao/api --env-file modernizacao/api/.env --reload --host 127.0.0.1 --port 8001`.
 4. Em outro terminal, sirva a prévia: `python -m http.server 18765 --bind 127.0.0.1 --directory modernizacao/site-preview`.
 5. Abra `http://127.0.0.1:18765`, escolha **Conectar banco de teste** e entre com um usuário existente na cópia.
 
