@@ -1,0 +1,33 @@
+name: Modernizacao preview checks
+on:
+  push:
+    branches: [modernizacao-react-preview]
+    paths:
+      - "modernizacao/**"
+      - ".github/workflows/modernizacao-preview.yml"
+  pull_request:
+    paths:
+      - "modernizacao/**"
+      - ".github/workflows/modernizacao-preview.yml"
+jobs:
+  api-and-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install API dependencies
+        run: python -m pip install -r modernizacao/api/requirements.txt
+      - name: Compile API
+        run: python -m compileall -q modernizacao/api
+      - name: Verify history and database isolation
+        run: python -m unittest discover -s modernizacao/api/tests -v
+      - name: Build React frontend
+        working-directory: modernizacao/frontend
+        run: |
+          npm install
+          npm run build
