@@ -52,7 +52,7 @@ REQUIRED_TABLES = {
 }
 
 app = FastAPI(title="Painel PCP API — Preview", version="0.1.0")
-origins = [x.strip() for x in os.getenv("PCP_CORS_ORIGINS", "http://localhost:5173").split(",") if x.strip()]
+origins = [x.strip() for x in os.getenv("PCP_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:18765,http://127.0.0.1:18765").split(",") if x.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
