@@ -37,24 +37,18 @@ def snapshot_info(path: Path) -> dict:
         conn.close()
 
 
-def main() -> int:
-    production = (ROOT / "data" / "indicadores.db").resolve()
-    if SOURCE != production:
-        print(f"Origem recusada: use o banco versionado esperado em {production}", file=sys.stderr)
-        return 2
-    if not SOURCE.is_file():
-        print(f"Banco de origem não encontrado: {SOURCE}", file=sys.stderr)
-        return 2
-    if DEST == SOURCE:
-        print("Destino não pode ser o banco operacional.", file=sys.stderr)
-        return 2
-    if DEST.exists():
-        print(f"O destino já existe; não será sobrescrito: {DEST}", file=sys.stderr)
-        return 2
-
-    DEST.parent.mkdir(parents=True, exist_ok=True)
-    temp = DEST.with_suffix(DEST.suffix + ".copying")
-    src = sqlite3.connect(f"file:{SOURCE.as_posix()}?mode=ro", uri=True)
+def copy_database(source: Path, destination: Path) -> dict:
+    """Create a consistent, non-overwriting SQLite copy and local manifest."""
+    source, destination = source.resolve(), destination.resolve()
+    if source == destination:
+        raise ValueError("Destino não pode ser igual à origem.")
+    if not source.is_file():
+        raise FileNotFoundError(f"Banco de origem não encontrado: {source}")
+    if destination.exists():
+        raise FileExistsError(f"O destino já existe; não será sobrescrito: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp = destination.with_suffix(destination.suffix + ".copying")
+    src = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
     dst = sqlite3.connect(temp)
     try:
         src.backup(dst)
@@ -62,21 +56,37 @@ def main() -> int:
     finally:
         dst.close()
         src.close()
-
-    info = snapshot_info(temp)
-    if info["integrity_check"] != "ok":
+    try:
+        info = snapshot_info(temp)
+        if info["integrity_check"] != "ok":
+            raise RuntimeError(f"Cópia reprovada no integrity_check: {info['integrity_check']}")
+        temp.replace(destination)
+        info["source"] = str(source)
+        info["created_at"] = __import__("datetime").datetime.now().astimezone().isoformat()
+        destination.with_suffix(".manifest.json").write_text(
+            json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return info
+    except Exception:
         temp.unlink(missing_ok=True)
-        raise RuntimeError(f"Cópia reprovada no integrity_check: {info['integrity_check']}")
-    temp.replace(DEST)
-    info["source"] = str(SOURCE)
-    info["created_at"] = __import__("datetime").datetime.now().astimezone().isoformat()
-    MANIFEST.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise
+
+
+def main() -> int:
+    production = (ROOT / "data" / "indicadores.db").resolve()
+    if SOURCE != production:
+        print(f"Origem recusada: use o banco versionado esperado em {production}", file=sys.stderr)
+        return 2
+    try:
+        info = copy_database(SOURCE, DEST)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     print(f"Cópia de teste criada: {DEST}")
-    print(f"Manifesto local: {MANIFEST}")
+    print(f"Manifesto local: {DEST.with_suffix('.manifest.json')}")
     print(f"Tabelas: {len(info['table_counts'])}; valores: {info['table_counts'].get('values_indicators', 0)}")
     print(f"Período: {info['values_date_min']} a {info['values_date_max']}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
