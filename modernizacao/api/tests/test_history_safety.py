@@ -10,8 +10,10 @@ from pathlib import Path
 os.environ.setdefault("PCP_PASSWORD_SALT", "test-salt")
 os.environ.setdefault("PCP_AUTH_SECRET", "test-secret-do-not-use-in-production")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 import app as api
+import copy_test_db
 
 
 class HistorySafetyTests(unittest.TestCase):
@@ -56,6 +58,29 @@ class HistorySafetyTests(unittest.TestCase):
         with self.assertRaises(api.HTTPException) as error:
             api._db()
         self.assertEqual(error.exception.status_code, 503)
+
+    def test_copy_script_preserves_synthetic_history_without_overwrite(self):
+        source = Path(self.tmp.name) / "synthetic_source.db"
+        destination = Path(self.tmp.name) / "isolated" / "preview.db"
+        conn = sqlite3.connect(source)
+        conn.executescript("""
+            CREATE TABLE values_indicators(data TEXT, cd TEXT, indicador TEXT, valor REAL);
+            INSERT INTO values_indicators VALUES('2025-01-01','SBC','Pedidos',4);
+            INSERT INTO values_indicators VALUES('2025-01-02','SBC','Pedidos',9);
+            CREATE TABLE audit_changes(id INTEGER PRIMARY KEY, motivo TEXT);
+            INSERT INTO audit_changes(motivo) VALUES('amostra');
+        """)
+        conn.commit()
+        conn.close()
+        source_info = copy_test_db.snapshot_info(source)
+        copied_info = copy_test_db.copy_database(source, destination)
+        self.assertEqual(source_info["table_counts"], copied_info["table_counts"])
+        self.assertEqual(source_info["values_date_min"], copied_info["values_date_min"])
+        self.assertEqual(source_info["values_date_max"], copied_info["values_date_max"])
+        self.assertEqual(copied_info["integrity_check"], "ok")
+        self.assertTrue(destination.with_suffix(".manifest.json").is_file())
+        with self.assertRaises(FileExistsError):
+            copy_test_db.copy_database(source, destination)
 
     def test_new_password_hash_is_salted_and_verifiable(self):
         stored = api._password_hash("senha-local-forte-123")
