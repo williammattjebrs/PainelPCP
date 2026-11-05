@@ -209,6 +209,16 @@ class CorrectionInput(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class DailyValueInput(BaseModel):
+    data: date
+    cd: str
+    codigo_indicador: str | None = None
+    grupo: str = ""
+    indicador: str = ""
+    valor: float | None
+    motivo: str = Field(min_length=1, max_length=1000)
+
+
 class TargetInput(BaseModel):
     cd: str
     grupo: str
@@ -382,6 +392,62 @@ def audit(limit: int = Query(1000, ge=1, le=10000), user: dict[str, Any] = Depen
         }
     finally:
         conn.close()
+
+
+@app.post("/api/values")
+def save_daily_value(body: DailyValueInput, user: dict[str, Any] = Depends(require("edit_data"))):
+    _scope_center(user, body.cd)
+    now = _now()
+    with transaction() as conn:
+        if body.codigo_indicador:
+            config = conn.execute(
+                "SELECT * FROM indicator_config WHERE cd=? AND codigo_indicador=? ORDER BY ativo DESC,id DESC LIMIT 1",
+                (body.cd,body.codigo_indicador),
+            ).fetchone()
+        else:
+            config = conn.execute(
+                "SELECT * FROM indicator_config WHERE cd=? AND grupo=? AND indicador=? ORDER BY ativo DESC,id DESC LIMIT 1",
+                (body.cd,body.grupo,body.indicador),
+            ).fetchone()
+        if not config or not config["ativo"] or config["tipo_campo"] != "dado_diario":
+            raise HTTPException(422,"Selecione um indicador diário ativo neste CD.")
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(values_indicators)")}
+        code = config["codigo_indicador"] if "codigo_indicador" in columns else None
+        old = None
+        if code:
+            old = conn.execute(
+                "SELECT id,valor FROM values_indicators WHERE data=? AND cd=? AND codigo_indicador=? ORDER BY id DESC LIMIT 1",
+                (body.data.isoformat(),body.cd,code),
+            ).fetchone()
+        if old is None:
+            old = conn.execute(
+                "SELECT id,valor FROM values_indicators WHERE data=? AND cd=? AND grupo=? AND indicador=? ORDER BY id DESC LIMIT 1",
+                (body.data.isoformat(),body.cd,config["grupo"],config["indicador"]),
+            ).fetchone()
+        if old is None:
+            if code:
+                conn.execute(
+                    "INSERT INTO values_indicators(data,cd,grupo,indicador,valor,source,created_by,created_at,codigo_indicador) VALUES(?,?,?,?,?,'manual',?,?,?)",
+                    (body.data.isoformat(),body.cd,config["grupo"],config["indicador"],body.valor,user["username"],now,code),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO values_indicators(data,cd,grupo,indicador,valor,source,created_by,created_at) VALUES(?,?,?,?,?,'manual',?,?)",
+                    (body.data.isoformat(),body.cd,config["grupo"],config["indicador"],body.valor,user["username"],now),
+                )
+            action = "inserted"
+        else:
+            conn.execute(
+                "UPDATE values_indicators SET valor=?,source='manual',updated_by=?,updated_at=? WHERE id=?",
+                (body.valor,user["username"],now,old["id"]),
+            )
+            if old["valor"] != body.valor:
+                conn.execute(
+                    "INSERT INTO audit_changes(data,cd,grupo,indicador,valor_anterior,valor_novo,motivo,changed_by,changed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (body.data.isoformat(),body.cd,config["grupo"],config["indicador"],old["valor"],body.valor,body.motivo,user["username"],now),
+                )
+            action = "updated"
+    return {"saved":True,"action":action,"audited":action=="inserted" or old["valor"]!=body.valor if old else True}
 
 
 @app.put("/api/values/{row_id}")
