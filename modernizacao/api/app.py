@@ -98,8 +98,25 @@ def _now() -> str:
 
 
 def _password_hash(password: str) -> str:
-    salt = _secret("PCP_PASSWORD_SALT")
-    return hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    salt = os.urandom(16)
+    iterations = 600_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return "pbkdf2_sha256$" + str(iterations) + "$" + base64.urlsafe_b64encode(salt).decode().rstrip("=") + "$" + base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def _verify_password(stored: str, password: str) -> tuple[bool, bool]:
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, rounds, salt_text, digest_text = stored.split("$", 3)
+            salt = base64.urlsafe_b64decode(salt_text + "=" * (-len(salt_text) % 4))
+            expected = base64.urlsafe_b64decode(digest_text + "=" * (-len(digest_text) % 4))
+            actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(rounds))
+            return hmac.compare_digest(expected, actual), False
+        except Exception:
+            return False, False
+    legacy_salt = _secret("PCP_PASSWORD_SALT")
+    legacy = hashlib.sha256(f"{legacy_salt}:{password}".encode()).hexdigest()
+    return hmac.compare_digest(stored, legacy), True
 
 
 def _token(username: str) -> str:
@@ -265,8 +282,14 @@ def login(body: LoginInput):
             "SELECT username, password_hash FROM users WHERE username=? AND active=1",
             (body.username.strip().lower(),),
         ).fetchone()
-        if not row or not hmac.compare_digest(str(row["password_hash"]), _password_hash(body.password)):
+        if not row:
             raise HTTPException(401, "Usuário ou senha inválidos.")
+        valid, legacy = _verify_password(str(row["password_hash"]), body.password)
+        if not valid:
+            raise HTTPException(401, "Usuário ou senha inválidos.")
+        if legacy:
+            conn.execute("UPDATE users SET password_hash=? WHERE username=?", (_password_hash(body.password), row["username"]))
+            conn.commit()
     finally:
         conn.close()
     return {"access_token": _token(row["username"]), "token_type": "bearer", "user": _user(row["username"])}
