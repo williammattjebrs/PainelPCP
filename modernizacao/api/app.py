@@ -736,3 +736,7 @@ def feature_catalog(user: dict[str, Any] = Depends(authenticated)):
         {"id":"audit","label":"Auditoria","permission":"view_audit"},
         {"id":"exports","label":"Exportações","permission":"export_reports"},
     ]
+
+
+# Routes kept separate from the core API for readable administration modules.
+import admin_routes  # noqa: E402,F401
