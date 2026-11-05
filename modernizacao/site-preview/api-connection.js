@@ -1,6 +1,6 @@
 (function(){
 "use strict";
-const API="http://127.0.0.1:8000";
+const API="http://127.0.0.1:8001";
 const tokenKey="pcp_test_api_token";
 const $=id=>document.getElementById(id);
 const modal=$("loginModal"),form=$("loginForm"),errorBox=$("loginError"),badge=$("modeBadge"),dayInput=$("apiDay"),centerSelect=$("center");
@@ -20,7 +20,7 @@ async function request(path,options){
  if(options&&options.body)headers.set("Content-Type","application/json");
  let response;
  try{response=await fetch(API+path,{...(options||{}),headers,mode:"cors",credentials:"omit"});}
- catch(_){throw new Error("Não foi possível acessar a API local. Inicie a API em 127.0.0.1:8000 e confira a permissão CORS para esta prévia.");}
+ catch(_){throw new Error("Não foi possível acessar a API local. Inicie a API em 127.0.0.1:8001 e confira a permissão CORS para esta prévia.");}
  if(!response.ok){
   if(response.status===401)throw new Error("Sessão expirada. Conecte-se novamente.");
   if(response.status===403)throw new Error("Este usuário não tem permissão para consultar os indicadores.");
@@ -149,6 +149,5 @@ if(token){
  request("/api/auth/me",{}).then(async current=>{user=current;centers=await request("/api/centers");const all=document.createElement("option");all.value="";all.textContent="Todos os CDs";centerSelect.replaceChildren(all);centers.forEach(c=>{const o=document.createElement("option");o.value=c.code;o.textContent=c.code+" · "+c.name;centerSelect.appendChild(o)});await loadSummary();setMode(true)}).catch(()=>{sessionStorage.removeItem(tokenKey);token="";setMode(false);setStatus("Sessão local expirada; os dados fictícios continuam visíveis.")});
 }
 })();
-
 
 
