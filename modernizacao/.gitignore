@@ -1,0 +1,7 @@
+# Ambiente e dados exclusivos do preview
+.env
+api/.env
+api/runtime/
+api/__pycache__/
+frontend/node_modules/
+frontend/dist/
