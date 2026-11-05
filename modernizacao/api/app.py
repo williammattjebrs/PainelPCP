@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -152,8 +152,6 @@ def current_user(authorization: str | None = None) -> dict[str, Any]:
     return _user(_decode_token(authorization[7:].strip()))
 
 
-from fastapi import Header
-
 def authenticated(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     return current_user(authorization)
 
@@ -161,6 +159,15 @@ def authenticated(authorization: str | None = Header(default=None)) -> dict[str,
 def require(permission: str):
     def check(user: dict[str, Any] = Depends(authenticated)) -> dict[str, Any]:
         if user["role"] != "admin" and permission not in user["permissions"]:
+            raise HTTPException(403, "Sem permissão para esta operação.")
+        return user
+    return check
+
+
+
+def require_any(*permissions: str):
+    def check(user: dict[str, Any] = Depends(authenticated)) -> dict[str, Any]:
+        if user["role"] != "admin" and not any(p in user["permissions"] for p in permissions):
             raise HTTPException(403, "Sem permissão para esta operação.")
         return user
     return check
@@ -226,7 +233,7 @@ class UserInput(BaseModel):
     password: str = Field(min_length=12)
     role: str = "operador"
     active: bool = True
-    centers: list[str] = []
+    centers: list[str] = Field(default_factory=list)
 
 
 class IndicatorPatch(BaseModel):
@@ -293,7 +300,7 @@ def save_center(body: dict[str, Any], user: dict[str, Any] = Depends(require("ma
 
 
 @app.get("/api/indicators")
-def indicators(cd: str | None = None, active_only: bool = True, user: dict[str, Any] = Depends(require("view_matrix"))):
+def indicators(cd: str | None = None, active_only: bool = True, user: dict[str, Any] = Depends(require_any("view_matrix", "view_dashboard", "view_daily", "view_monthly", "configure_indicators"))):
     _scope_center(user, cd)
     conn = _db()
     try:
@@ -318,7 +325,7 @@ def values(
     end: str | None = None,
     limit: int = Query(default=5000, ge=1, le=50000),
     offset: int = Query(default=0, ge=0),
-    user: dict[str, Any] = Depends(require("view_matrix")),
+    user: dict[str, Any] = Depends(require_any("view_matrix", "view_dashboard", "view_daily", "view_monthly")),
 ):
     _scope_center(user, cd)
     conn = _db()
@@ -422,7 +429,7 @@ def _normalize_import_rows(raw_rows: list[dict[str, Any]], conn: sqlite3.Connect
         row = {str(k).strip().lower(): v for k, v in row.items()}
         raw_date = str(row.get("data") or row.get("date") or "").strip()
         try:
-            parsed_date = datetime.fromisoformat(raw_date[:10]).date().isoformat()
+            parsed_date = (datetime.strptime(raw_date[:10], "%d/%m/%Y").date() if "/" in raw_date else datetime.fromisoformat(raw_date[:10]).date()).isoformat()
         except ValueError:
             rejected.append({"row": row, "reason": "Data inválida"}); continue
         cd = str(row.get("cd") or "").strip().upper()
