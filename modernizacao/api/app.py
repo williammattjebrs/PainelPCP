@@ -562,7 +562,7 @@ def commit_import(body: ImportCommit, user: dict[str, Any] = Depends(require("im
 
 
 @app.get("/api/targets")
-def targets(cd: str | None = None, user: dict[str, Any] = Depends(require("view_dashboard"))):
+def targets(cd: str | None = None, user: dict[str, Any] = Depends(require_any("view_dashboard", "configure_targets"))):
     _scope_center(user, cd)
     conn = _db()
     try:
