@@ -288,7 +288,11 @@ def me(user: dict[str, Any] = Depends(authenticated)):
 def centers(user: dict[str, Any] = Depends(authenticated)):
     conn = _db()
     try:
-        rows = conn.execute("SELECT code, name, active, is_default FROM centers ORDER BY code").fetchall()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(centers)")}
+        default_column = "is_default" if "is_default" in columns else "0 AS is_default"
+        rows = conn.execute(
+            f"SELECT code, name, active, {default_column} FROM centers ORDER BY code"
+        ).fetchall()
         return [dict(r) for r in rows if user["role"] == "admin" or r["code"] in user["centers"]]
     finally:
         conn.close()
