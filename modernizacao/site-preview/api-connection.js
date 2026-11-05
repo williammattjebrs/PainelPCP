@@ -7,6 +7,12 @@ const modal=$("loginModal"),form=$("loginForm"),errorBox=$("loginError"),badge=$
 let token=sessionStorage.getItem(tokenKey)||"",user=null,centers=[];
 const fmt=n=>new Intl.NumberFormat("pt-BR",{maximumFractionDigits:2}).format(n);
 const dateLabel=s=>{if(!s)return "—";const p=s.split("-");return p.length===3?p[2]+"/"+p[1]+"/"+p[0]:s};
+function setMetricFoot(index,lead,detail){
+ const host=document.querySelectorAll(".metric-foot")[index];if(!host)return;
+ const primary=document.createElement("span");primary.className="trend";primary.textContent=lead;
+ const secondary=document.createElement("span");secondary.textContent=detail;
+ host.replaceChildren(primary,secondary);
+}
 function notice(text){const toast=$("toast");toast.textContent=text;toast.classList.add("show");setTimeout(()=>toast.classList.remove("show"),3200)}
 function setStatus(text){$("dataStatus").textContent=text}
 function setMode(connected){
@@ -40,6 +46,10 @@ function updateKpis(rows,day){
  $("metricThreeValue").textContent=fmt(cds.size);
  $("metricFourLabel").textContent="DATA CONSULTADA";
  $("metricFourValue").textContent=dateLabel(day);
+ setMetricFoot(0,fmt(rows.length)+" registros","retornados na data consultada");
+ setMetricFoot(1,fmt(withValue)+" com valor","no conjunto consultado");
+ setMetricFoot(2,fmt(cds.size)+" CDs","com registros nesta data");
+ setMetricFoot(3,"Data selecionada","consulta somente leitura");
  const subtitle=document.querySelector(".page-heading .eyebrow");
  subtitle.textContent="DADOS DA CÓPIA LOCAL · "+dateLabel(day);
 }
